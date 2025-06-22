@@ -27,7 +27,7 @@ export function AIVoiceInputDemo() {
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [selectedLanguage, setSelectedLanguage] = useState("English");
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [connectionStatus, setConnectionStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
+  const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   // WebSocket and audio refs
@@ -41,18 +41,23 @@ export function AIVoiceInputDemo() {
   const CHUNK_DURATION_MS = 1000;
 
   const appendLog = (message: string, type: 'info' | 'error' | 'warning' = 'info') => {
+    if (!isListening) return; // Only log when actively listening
+    
     const timestamp = new Date().toISOString().replace('T', ' ').replace('Z', '').slice(0, 23);
     setLogs(prev => [...prev, { timestamp, type, message }]);
     console.log(`[${type.toUpperCase()}] ${message}`);
   };
 
   const handleStart = async () => {
-    appendLog('Starting audio recording...');
+    // Clear previous logs when starting new session
+    setLogs([]);
     setError(null);
-    setConnectionStatus('connecting');
+    setIsListening(true);
+    
+    appendLog('Starting audio recording...');
     
     try {
-      // Generate new recording ID
+      // Generate new recording ID - only create ONE recording
       const recordingId = crypto.randomUUID();
       streamIdRef.current = crypto.randomUUID();
       
@@ -72,7 +77,7 @@ export function AIVoiceInputDemo() {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
       appendLog(`Failed to start recording: ${errorMessage}`, 'error');
       setError(errorMessage);
-      setConnectionStatus('error');
+      setIsListening(false);
       
       if (currentRecordingRef.current) {
         setRecordings(prev => prev.map(r => 
@@ -86,6 +91,7 @@ export function AIVoiceInputDemo() {
 
   const handleStop = (duration: number) => {
     appendLog(`Stopping recording after ${duration} seconds`);
+    setIsListening(false);
     stopListening();
     
     if (currentRecordingRef.current) {
@@ -108,18 +114,17 @@ export function AIVoiceInputDemo() {
 
       webSocket.onopen = () => {
         appendLog('WebSocket connected. Requesting microphone access...');
-        setConnectionStatus('connected');
         initAudioCapture().then(resolve).catch(reject);
       };
 
       webSocket.onclose = (event) => {
         appendLog(`WebSocket closed: ${event.reason || 'No reason given'} (Code: ${event.code})`, 'warning');
-        setConnectionStatus('idle');
+        setIsListening(false);
       };
 
       webSocket.onerror = (error) => {
         appendLog('WebSocket connection failed', 'error');
-        setConnectionStatus('error');
+        setIsListening(false);
         reject(new Error('WebSocket connection failed'));
       };
 
@@ -209,7 +214,7 @@ export function AIVoiceInputDemo() {
       webSocketRef.current.close(1000, "Client initiated stop");
     }
 
-    setConnectionStatus('idle');
+    setIsListening(false);
     mediaRecorderRef.current = null;
     audioContextRef.current = null;
     webSocketRef.current = null;
@@ -287,13 +292,16 @@ export function AIVoiceInputDemo() {
           <CardHeader>
             <CardTitle>Interactive Voice Input</CardTitle>
             <CardDescription>
-              Click the microphone button to start/stop recording
+              {isListening 
+                ? `Listening to ${selectedLanguage}...` 
+                : "Click the microphone button to start/stop recording"
+              }
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-col space-y-2">
               <label className="text-sm font-medium">Language</label>
-              <Select value={selectedLanguage} onValueChange={setSelectedLanguage}>
+              <Select value={selectedLanguage} onValueChange={setSelectedLanguage} disabled={isListening}>
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select language" />
                 </SelectTrigger>
@@ -306,18 +314,6 @@ export function AIVoiceInputDemo() {
                   <SelectItem value="Urdu">Urdu</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-            
-            <div className="flex flex-col space-y-2">
-              <label className="text-sm font-medium">Connection Status</label>
-              <div className="flex items-center gap-2">
-                <div className={`w-3 h-3 rounded-full ${
-                  connectionStatus === 'connected' ? 'bg-green-500' :
-                  connectionStatus === 'connecting' ? 'bg-yellow-500' :
-                  connectionStatus === 'error' ? 'bg-red-500' : 'bg-gray-400'
-                }`} />
-                <span className="text-sm capitalize">{connectionStatus}</span>
-              </div>
             </div>
 
             <AIVoiceInput 
@@ -386,30 +382,13 @@ export function AIVoiceInputDemo() {
         )}
       </div>
 
-      {/* Right Side */}
+      {/* Right Side - Full Width Live Logs */}
       <div className="space-y-8">
-        <Card>
-          <CardHeader>
-            <CardTitle>Demo Mode</CardTitle>
-            <CardDescription>
-              Automatic demonstration of the component functionality
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <AIVoiceInput 
-              demoMode={true}
-              demoInterval={2500}
-              onStart={() => appendLog('Demo recording started')}
-              onStop={(duration) => appendLog(`Demo recording stopped: ${duration}s`)}
-            />
-          </CardContent>
-        </Card>
-
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <div>
               <CardTitle>Live Logs</CardTitle>
-              <CardDescription>Real-time system logs</CardDescription>
+              <CardDescription>Real-time system logs (only when recording)</CardDescription>
             </div>
             <Button variant="outline" size="sm" onClick={clearLogs}>
               Clear Logs
@@ -418,7 +397,9 @@ export function AIVoiceInputDemo() {
           <CardContent>
             <div className="space-y-1 max-h-96 overflow-y-auto font-mono text-sm">
               {logs.length === 0 ? (
-                <div className="text-muted-foreground italic">No logs yet...</div>
+                <div className="text-muted-foreground italic">
+                  {isListening ? "Waiting for logs..." : "Click 'Click to speak' to see logs..."}
+                </div>
               ) : (
                 logs.slice(-50).map((log, index) => (
                   <div key={index} className={`p-2 rounded text-xs border-l-2 ${
@@ -430,37 +411,6 @@ export function AIVoiceInputDemo() {
                   </div>
                 ))
               )}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Component Features</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-4">
-              <div className="space-y-2">
-                <h4 className="font-medium">Visual Features</h4>
-                <ul className="text-sm text-muted-foreground space-y-1">
-                  <li>• Animated audio visualizer bars</li>
-                  <li>• Real-time recording timer</li>
-                  <li>• Smooth hover and transition effects</li>
-                  <li>• Dark mode support</li>
-                  <li>• Connection status indicator</li>
-                </ul>
-              </div>
-              <div className="space-y-2">
-                <h4 className="font-medium">Functional Features</h4>
-                <ul className="text-sm text-muted-foreground space-y-1">
-                  <li>• WebSocket audio streaming</li>
-                  <li>• Multi-language support</li>
-                  <li>• Individual recording download</li>
-                  <li>• Real-time error handling</li>
-                  <li>• Recording status tracking</li>
-                  <li>• Live system logs</li>
-                </ul>
-              </div>
             </div>
           </CardContent>
         </Card>
