@@ -29,6 +29,7 @@ export function AIVoiceInputDemo() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
   
   // WebSocket and audio refs
   const webSocketRef = useRef<WebSocket | null>(null);
@@ -41,7 +42,7 @@ export function AIVoiceInputDemo() {
   const CHUNK_DURATION_MS = 1000;
 
   const appendLog = (message: string, type: 'info' | 'error' | 'warning' = 'info') => {
-    if (!isListening) return; // Only log when actively listening
+    if (!isListening && !isConnecting) return; // Only log when actively listening or connecting
     
     const timestamp = new Date().toISOString().replace('T', ' ').replace('Z', '').slice(0, 23);
     setLogs(prev => [...prev, { timestamp, type, message }]);
@@ -49,10 +50,16 @@ export function AIVoiceInputDemo() {
   };
 
   const handleStart = async () => {
+    // Prevent multiple simultaneous connection attempts
+    if (isConnecting || isListening || webSocketRef.current) {
+      console.log('[INFO] Connection attempt blocked - already connecting or listening');
+      return;
+    }
+
     // Clear previous logs when starting new session
     setLogs([]);
     setError(null);
-    setIsListening(true);
+    setIsConnecting(true);
     
     appendLog('Starting audio recording...');
     
@@ -77,6 +84,7 @@ export function AIVoiceInputDemo() {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
       appendLog(`Failed to start recording: ${errorMessage}`, 'error');
       setError(errorMessage);
+      setIsConnecting(false);
       setIsListening(false);
       
       if (currentRecordingRef.current) {
@@ -91,6 +99,7 @@ export function AIVoiceInputDemo() {
 
   const handleStop = (duration: number) => {
     appendLog(`Stopping recording after ${duration} seconds`);
+    setIsConnecting(false);
     setIsListening(false);
     stopListening();
     
@@ -106,6 +115,13 @@ export function AIVoiceInputDemo() {
 
   const initWebSocket = async () => {
     return new Promise<void>((resolve, reject) => {
+      // Check if already connecting or connected
+      if (webSocketRef.current) {
+        appendLog('WebSocket already exists, cleaning up first...', 'warning');
+        webSocketRef.current.close();
+        webSocketRef.current = null;
+      }
+
       appendLog('Connecting to WebSocket...');
       
       const wsUrlWithStreamId = `${WEBSOCKET_URL}?streamSid=${streamIdRef.current}&language=${selectedLanguage}`;
@@ -114,17 +130,23 @@ export function AIVoiceInputDemo() {
 
       webSocket.onopen = () => {
         appendLog('WebSocket connected. Requesting microphone access...');
+        setIsConnecting(false);
+        setIsListening(true);
         initAudioCapture().then(resolve).catch(reject);
       };
 
       webSocket.onclose = (event) => {
         appendLog(`WebSocket closed: ${event.reason || 'No reason given'} (Code: ${event.code})`, 'warning');
+        setIsConnecting(false);
         setIsListening(false);
+        webSocketRef.current = null;
       };
 
       webSocket.onerror = (error) => {
         appendLog('WebSocket connection failed', 'error');
+        setIsConnecting(false);
         setIsListening(false);
+        webSocketRef.current = null;
         reject(new Error('WebSocket connection failed'));
       };
 
@@ -214,6 +236,7 @@ export function AIVoiceInputDemo() {
       webSocketRef.current.close(1000, "Client initiated stop");
     }
 
+    setIsConnecting(false);
     setIsListening(false);
     mediaRecorderRef.current = null;
     audioContextRef.current = null;
@@ -290,18 +313,20 @@ export function AIVoiceInputDemo() {
 
         <Card className="border-2">
           <CardHeader>
-            <CardTitle>Interactive Voice Input</CardTitle>
+            <CardTitle>Cold Call Audio Streaming Solution</CardTitle>
             <CardDescription>
-              {isListening 
-                ? `Listening to ${selectedLanguage}...` 
-                : "Click the microphone button to start/stop recording"
+              {isConnecting 
+                ? "Connecting..." 
+                : isListening 
+                  ? `Listening to ${selectedLanguage}...` 
+                  : "Click the microphone button to start/stop recording"
               }
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-col space-y-2">
               <label className="text-sm font-medium">Language</label>
-              <Select value={selectedLanguage} onValueChange={setSelectedLanguage} disabled={isListening}>
+              <Select value={selectedLanguage} onValueChange={setSelectedLanguage} disabled={isListening || isConnecting}>
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select language" />
                 </SelectTrigger>
@@ -382,7 +407,7 @@ export function AIVoiceInputDemo() {
         )}
       </div>
 
-      {/* Right Side - Full Width Live Logs */}
+      {/* Right Side - Live Logs */}
       <div className="space-y-8">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
@@ -398,7 +423,7 @@ export function AIVoiceInputDemo() {
             <div className="space-y-1 max-h-96 overflow-y-auto font-mono text-sm">
               {logs.length === 0 ? (
                 <div className="text-muted-foreground italic">
-                  {isListening ? "Waiting for logs..." : "Click 'Click to speak' to see logs..."}
+                  {isListening || isConnecting ? "Waiting for logs..." : "Click 'Click to speak' to see logs..."}
                 </div>
               ) : (
                 logs.slice(-50).map((log, index) => (
