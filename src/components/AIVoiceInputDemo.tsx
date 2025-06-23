@@ -1,10 +1,11 @@
+
 import { AIVoiceInput } from "@/components/ui/ai-voice-input";
 import { useState, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Download, AlertCircle, CheckCircle, Trash2 } from "lucide-react";
+import { Download, AlertCircle, CheckCircle, Trash2, Play, Pause } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
 interface Recording {
@@ -12,7 +13,7 @@ interface Recording {
   duration: number;
   timestamp: Date;
   status: 'success' | 'error' | 'processing';
-  audioData?: Blob;
+  audioBlob?: Blob;
   error?: string;
 }
 
@@ -29,6 +30,7 @@ export function AIVoiceInputDemo() {
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [playingRecording, setPlayingRecording] = useState<string | null>(null);
   
   // WebSocket and audio refs
   const webSocketRef = useRef<WebSocket | null>(null);
@@ -37,6 +39,8 @@ export function AIVoiceInputDemo() {
   const streamIdRef = useRef<string>('');
   const currentRecordingRef = useRef<Recording | null>(null);
   const connectionAttemptInProgress = useRef<boolean>(false);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const WEBSOCKET_URL = 'ws://localhost:6543/voice/ws/browser/stream';
   const CHUNK_DURATION_MS = 1000;
@@ -50,17 +54,16 @@ export function AIVoiceInputDemo() {
   };
 
   const handleStart = async () => {
-    // Prevent multiple simultaneous connection attempts
     if (isConnecting || isListening || connectionAttemptInProgress.current) {
       console.log('[INFO] Connection attempt blocked - already connecting or listening');
       return;
     }
 
-    // Set flag to prevent multiple attempts
     connectionAttemptInProgress.current = true;
     setLogs([]);
     setError(null);
     setIsConnecting(true);
+    audioChunksRef.current = []; // Reset audio chunks for new recording
     
     appendLog('Starting audio recording...');
     
@@ -83,8 +86,6 @@ export function AIVoiceInputDemo() {
       const errorMessage = err instanceof Error ? err.message : 'WebSocket connection failed';
       appendLog(`Failed to start recording: ${errorMessage}`, 'error');
       setError(errorMessage);
-      
-      // Stop everything and mark recording as failed
       handleConnectionFailure(errorMessage);
     }
   };
@@ -94,7 +95,6 @@ export function AIVoiceInputDemo() {
     setIsListening(false);
     connectionAttemptInProgress.current = false;
     
-    // Mark current recording as failed
     if (currentRecordingRef.current) {
       setRecordings(prev => prev.map(r => 
         r.id === currentRecordingRef.current?.id 
@@ -104,7 +104,6 @@ export function AIVoiceInputDemo() {
       currentRecordingRef.current = null;
     }
     
-    // Clean up all resources
     cleanupResources();
   };
 
@@ -113,21 +112,30 @@ export function AIVoiceInputDemo() {
     setIsConnecting(false);
     setIsListening(false);
     connectionAttemptInProgress.current = false;
-    stopListening();
     
-    if (currentRecordingRef.current) {
+    // Create final audio blob from chunks
+    if (audioChunksRef.current.length > 0 && currentRecordingRef.current) {
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      
+      setRecordings(prev => prev.map(r => 
+        r.id === currentRecordingRef.current?.id 
+          ? { ...r, duration, status: 'success', audioBlob }
+          : r
+      ));
+    } else if (currentRecordingRef.current) {
       setRecordings(prev => prev.map(r => 
         r.id === currentRecordingRef.current?.id 
           ? { ...r, duration, status: 'success' }
           : r
       ));
-      currentRecordingRef.current = null;
     }
+    
+    currentRecordingRef.current = null;
+    stopListening();
   };
 
   const initWebSocket = async () => {
     return new Promise<void>((resolve, reject) => {
-      // Ensure no existing connection
       if (webSocketRef.current) {
         webSocketRef.current.close();
         webSocketRef.current = null;
@@ -139,13 +147,12 @@ export function AIVoiceInputDemo() {
       const webSocket = new WebSocket(wsUrlWithStreamId);
       webSocketRef.current = webSocket;
 
-      // Set a connection timeout
       const connectionTimeout = setTimeout(() => {
         if (webSocket.readyState === WebSocket.CONNECTING) {
           webSocket.close();
           reject(new Error('WebSocket connection timeout'));
         }
-      }, 10000); // 10 second timeout
+      }, 10000);
 
       webSocket.onopen = () => {
         clearTimeout(connectionTimeout);
@@ -205,22 +212,28 @@ export function AIVoiceInputDemo() {
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0 && webSocketRef.current && webSocketRef.current.readyState === WebSocket.OPEN) {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const base64Audio = (reader.result as string).split(',')[1];
-            const message = {
-              start: {
-                streamSid: streamIdRef.current
-              },
-              media: {
-                payload: base64Audio
-              }
+        if (event.data.size > 0) {
+          // Store audio chunk locally for MP3 download
+          audioChunksRef.current.push(event.data);
+          
+          // Also send to WebSocket if connected
+          if (webSocketRef.current && webSocketRef.current.readyState === WebSocket.OPEN) {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const base64Audio = (reader.result as string).split(',')[1];
+              const message = {
+                start: {
+                  streamSid: streamIdRef.current
+                },
+                media: {
+                  payload: base64Audio
+                }
+              };
+              webSocketRef.current?.send(JSON.stringify(message));
+              appendLog('Audio chunk sent to server');
             };
-            webSocketRef.current?.send(JSON.stringify(message));
-            appendLog('Audio chunk sent to server');
-          };
-          reader.readAsDataURL(event.data);
+            reader.readAsDataURL(event.data);
+          }
         }
       };
 
@@ -274,6 +287,12 @@ export function AIVoiceInputDemo() {
   };
 
   const clearAllRecordings = () => {
+    // Stop any playing audio
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    setPlayingRecording(null);
     setRecordings([]);
     setLogs([]);
     setError(null);
@@ -302,21 +321,67 @@ export function AIVoiceInputDemo() {
   };
 
   const downloadIndividualRecording = (recording: Recording) => {
-    const csvContent = "data:text/csv;charset=utf-8," 
-      + "Property,Value\n"
-      + `ID,${recording.id}\n`
-      + `Duration,${formatDuration(recording.duration)}\n`
-      + `Status,${recording.status}\n`
-      + `Timestamp,${recording.timestamp.toLocaleString()}\n`
-      + `Error,${recording.error || 'None'}`;
-    
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `recording_${recording.id.slice(0, 8)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    if (recording.audioBlob) {
+      // Download as MP3/WebM audio file
+      const url = URL.createObjectURL(recording.audioBlob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `recording_${recording.id.slice(0, 8)}.webm`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } else {
+      // Fallback to CSV if no audio data
+      const csvContent = "data:text/csv;charset=utf-8," 
+        + "Property,Value\n"
+        + `ID,${recording.id}\n`
+        + `Duration,${formatDuration(recording.duration)}\n`
+        + `Status,${recording.status}\n`
+        + `Timestamp,${recording.timestamp.toLocaleString()}\n`
+        + `Error,${recording.error || 'None'}`;
+      
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", `recording_${recording.id.slice(0, 8)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  };
+
+  const playRecording = (recording: Recording) => {
+    if (!recording.audioBlob) return;
+
+    // Stop any currently playing audio
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+    }
+
+    if (playingRecording === recording.id) {
+      // Stop playing
+      setPlayingRecording(null);
+      currentAudioRef.current = null;
+      return;
+    }
+
+    // Start playing
+    const audio = new Audio(URL.createObjectURL(recording.audioBlob));
+    currentAudioRef.current = audio;
+    setPlayingRecording(recording.id);
+
+    audio.onended = () => {
+      setPlayingRecording(null);
+      currentAudioRef.current = null;
+    };
+
+    audio.onerror = () => {
+      setPlayingRecording(null);
+      currentAudioRef.current = null;
+    };
+
+    audio.play();
   };
 
   const getStatusIcon = (status: Recording['status']) => {
@@ -437,14 +502,30 @@ export function AIVoiceInputDemo() {
                           </div>
                         )}
                       </div>
-                      <Button 
-                        variant="outline" 
-                        size="sm" 
-                        onClick={() => downloadIndividualRecording(recording)}
-                        className="flex items-center gap-1"
-                      >
-                        <Download className="w-3 h-3" />
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        {recording.audioBlob && recording.status === 'success' && (
+                          <Button 
+                            variant="outline" 
+                            size="sm" 
+                            onClick={() => playRecording(recording)}
+                            className="flex items-center gap-1"
+                          >
+                            {playingRecording === recording.id ? (
+                              <Pause className="w-3 h-3" />
+                            ) : (
+                              <Play className="w-3 h-3" />
+                            )}
+                          </Button>
+                        )}
+                        <Button 
+                          variant="outline" 
+                          size="sm" 
+                          onClick={() => downloadIndividualRecording(recording)}
+                          className="flex items-center gap-1"
+                        >
+                          <Download className="w-3 h-3" />
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 ))}
