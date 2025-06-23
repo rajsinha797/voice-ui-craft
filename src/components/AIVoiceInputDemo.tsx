@@ -1,4 +1,3 @@
-
 import { AIVoiceInput } from "@/components/ui/ai-voice-input";
 import { useState, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,11 +41,15 @@ export function AIVoiceInputDemo() {
   const audioChunksRef = useRef<Blob[]>([]);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   
-  // New refs for playback management
+  // New refs for full conversation recording
   const playbackQueueRef = useRef<AudioBuffer[]>([]);
   const isPlayingRef = useRef<boolean>(false);
   const nextSeqToPlayRef = useRef<number>(0);
   const audioBufferMapRef = useRef<{[key: number]: AudioBuffer}>({});
+  const mixerNodeRef = useRef<GainNode | null>(null);
+  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const destinationStreamRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const fullConversationRecorderRef = useRef<MediaRecorder | null>(null);
 
   const WEBSOCKET_URL = 'ws://localhost:6543/voice/ws/browser/stream';
   const CHUNK_DURATION_MS = 1000;
@@ -123,16 +126,20 @@ export function AIVoiceInputDemo() {
     setIsListening(false);
     connectionAttemptInProgress.current = false;
     
-    // Stop MediaRecorder and create final audio blob
+    // Stop full conversation recorder first
+    if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
+      fullConversationRecorderRef.current.stop();
+    }
+    
+    // Stop MediaRecorder for WebSocket streaming
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
     }
     
-    // Create final audio blob from chunks when MediaRecorder stops
+    // Update recording status when full conversation recording completes
     if (currentRecordingRef.current) {
       const recordingId = currentRecordingRef.current.id;
       
-      // Wait for MediaRecorder to stop and process final chunks
       setTimeout(() => {
         if (audioChunksRef.current.length > 0) {
           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
@@ -182,7 +189,7 @@ export function AIVoiceInputDemo() {
         setIsConnecting(false);
         setIsListening(true);
         connectionAttemptInProgress.current = false;
-        initAudioCapture().then(resolve).catch(reject);
+        initFullConversationRecording().then(resolve).catch(reject);
       };
 
       webSocket.onclose = (event) => {
@@ -219,7 +226,6 @@ export function AIVoiceInputDemo() {
           const seq = message.media.seq;
           appendLog(`Received audio chunk, seq=${seq}`);
           
-          // Handle incoming audio for playback
           const base64 = message.media.payload;
           const audioBytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
           
@@ -259,53 +265,77 @@ export function AIVoiceInputDemo() {
     }
 
     const buffer = playbackQueueRef.current.shift();
-    if (!buffer || !audioContextRef.current) return;
+    if (!buffer || !audioContextRef.current || !mixerNodeRef.current) return;
 
     const source = audioContextRef.current.createBufferSource();
     source.buffer = buffer;
-    source.connect(audioContextRef.current.destination);
+    
+    // Connect TTS audio to mixer so it gets recorded in full conversation
+    source.connect(mixerNodeRef.current);
+    source.connect(audioContextRef.current.destination); // Also play through speakers
 
     isPlayingRef.current = true;
-    appendLog('Starting TTS playback - muting microphone');
-
-    // 🔇 Pause MediaRecorder during playback
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.pause();
-      appendLog('Microphone paused during TTS playback');
-    }
+    appendLog('Starting TTS playback - recording continues');
 
     source.onended = () => {
-      appendLog('TTS playback ended - resuming microphone');
-
-      // ▶️ Resume mic after playback
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
-        mediaRecorderRef.current.resume();
-        appendLog('Microphone resumed after TTS playback');
-      }
-
+      appendLog('TTS playback ended');
       isPlayingRef.current = false;
-      playNextFromQueue(); // play next in queue
+      playNextFromQueue();
     };
 
     source.start(0);
   };
 
-  const initAudioCapture = async () => {
+  const initFullConversationRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      appendLog('Microphone access granted. Starting stream...');
+      appendLog('Microphone access granted. Setting up full conversation recording...');
 
+      // Create audio context and mixer for full conversation recording
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       
+      // Create mixer node to combine microphone and TTS audio
+      mixerNodeRef.current = audioContextRef.current.createGain();
+      
+      // Create destination stream for full conversation recording
+      destinationStreamRef.current = audioContextRef.current.createMediaStreamDestination();
+      mixerNodeRef.current.connect(destinationStreamRef.current);
+      
+      // Connect microphone to mixer
+      micSourceRef.current = audioContextRef.current.createMediaStreamSource(stream);
+      micSourceRef.current.connect(mixerNodeRef.current);
+      
+      // Set up full conversation recorder
+      fullConversationRecorderRef.current = new MediaRecorder(destinationStreamRef.current.stream);
+      
+      fullConversationRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+          appendLog(`Full conversation chunk recorded: ${event.data.size} bytes`);
+        }
+      };
+
+      fullConversationRecorderRef.current.onstart = () => {
+        appendLog('Full conversation recording started');
+      };
+
+      fullConversationRecorderRef.current.onstop = () => {
+        appendLog('Full conversation recording stopped');
+      };
+
+      fullConversationRecorderRef.current.onerror = (event) => {
+        appendLog(`Full conversation recorder error: ${(event as any).error.name}`, 'error');
+      };
+
+      // Start full conversation recording
+      fullConversationRecorderRef.current.start(CHUNK_DURATION_MS);
+      
+      // Set up separate MediaRecorder for WebSocket streaming (microphone only)
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          // Store audio chunk locally for download
-          audioChunksRef.current.push(event.data);
-          
-          // Also send to WebSocket if connected
           if (webSocketRef.current && webSocketRef.current.readyState === WebSocket.OPEN) {
             const reader = new FileReader();
             reader.onloadend = () => {
@@ -327,20 +357,21 @@ export function AIVoiceInputDemo() {
       };
 
       mediaRecorder.onstart = () => {
-        appendLog('MediaRecorder started, streaming audio...');
+        appendLog('WebSocket streaming started');
       };
 
       mediaRecorder.onstop = () => {
-        appendLog('MediaRecorder stopped');
+        appendLog('WebSocket streaming stopped');
         stream.getTracks().forEach(track => track.stop());
       };
 
       mediaRecorder.onerror = (event) => {
-        appendLog(`MediaRecorder error: ${(event as any).error.name}`, 'error');
+        appendLog(`WebSocket streaming error: ${(event as any).error.name}`, 'error');
         handleConnectionFailure(`MediaRecorder error: ${(event as any).error.name}`);
       };
 
       mediaRecorder.start(CHUNK_DURATION_MS);
+      
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Microphone access denied';
       appendLog(`Error accessing microphone: ${errorMessage}`, 'error');
@@ -351,8 +382,27 @@ export function AIVoiceInputDemo() {
   const cleanupResources = () => {
     appendLog('Cleaning up audio resources...');
     
+    if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
+      fullConversationRecorderRef.current.stop();
+    }
+    
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
+    }
+
+    if (micSourceRef.current) {
+      micSourceRef.current.disconnect();
+      micSourceRef.current = null;
+    }
+    
+    if (mixerNodeRef.current) {
+      mixerNodeRef.current.disconnect();
+      mixerNodeRef.current = null;
+    }
+    
+    if (destinationStreamRef.current) {
+      destinationStreamRef.current.disconnect();
+      destinationStreamRef.current = null;
     }
 
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
@@ -363,6 +413,7 @@ export function AIVoiceInputDemo() {
       webSocketRef.current.close(1000, "Client initiated stop");
     }
 
+    fullConversationRecorderRef.current = null;
     mediaRecorderRef.current = null;
     audioContextRef.current = null;
     webSocketRef.current = null;
@@ -412,17 +463,15 @@ export function AIVoiceInputDemo() {
 
   const downloadIndividualRecording = (recording: Recording) => {
     if (recording.audioBlob) {
-      // Download as WebM audio file (not MP3, but audio format)
       const url = URL.createObjectURL(recording.audioBlob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `recording_${recording.id.slice(0, 8)}.webm`;
+      link.download = `full_conversation_${recording.id.slice(0, 8)}.webm`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
     } else {
-      // Fallback to CSV if no audio data
       const csvContent = "data:text/csv;charset=utf-8," 
         + "Property,Value\n"
         + `ID,${recording.id}\n`
@@ -444,19 +493,16 @@ export function AIVoiceInputDemo() {
   const playRecording = (recording: Recording) => {
     if (!recording.audioBlob) return;
 
-    // Stop any currently playing audio
     if (currentAudioRef.current) {
       currentAudioRef.current.pause();
     }
 
     if (playingRecording === recording.id) {
-      // Stop playing
       setPlayingRecording(null);
       currentAudioRef.current = null;
       return;
     }
 
-    // Start playing
     const audio = new Audio(URL.createObjectURL(recording.audioBlob));
     currentAudioRef.current = audio;
     setPlayingRecording(recording.id);
@@ -509,8 +555,8 @@ export function AIVoiceInputDemo() {
               {isConnecting 
                 ? "Connecting..." 
                 : isListening 
-                  ? `Listening to ${selectedLanguage}...` 
-                  : "Click the microphone button to start/stop recording"
+                  ? `Recording full conversation in ${selectedLanguage}...` 
+                  : "Click the microphone button to start/stop recording full conversation"
               }
             </CardDescription>
           </CardHeader>
@@ -543,9 +589,9 @@ export function AIVoiceInputDemo() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
-                <CardTitle>Recording History</CardTitle>
+                <CardTitle>Full Conversation History</CardTitle>
                 <CardDescription>
-                  Your recent voice recordings (last 10)
+                  Your recent full conversation recordings (last 10) - includes both voice and TTS playback
                 </CardDescription>
               </div>
               <div className="flex gap-2">
@@ -579,7 +625,7 @@ export function AIVoiceInputDemo() {
                   }`}>
                     <div className="flex items-center gap-3">
                       <Badge variant="secondary">#{recordings.length - index}</Badge>
-                      <span className="font-medium">Recording</span>
+                      <span className="font-medium">Full Conversation</span>
                       {getStatusIcon(recording.status)}
                     </div>
                     <div className="flex items-center gap-4">
