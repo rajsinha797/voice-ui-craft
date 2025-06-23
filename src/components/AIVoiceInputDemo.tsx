@@ -41,6 +41,12 @@ export function AIVoiceInputDemo() {
   const connectionAttemptInProgress = useRef<boolean>(false);
   const audioChunksRef = useRef<Blob[]>([]);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  
+  // New refs for playback management
+  const playbackQueueRef = useRef<AudioBuffer[]>([]);
+  const isPlayingRef = useRef<boolean>(false);
+  const nextSeqToPlayRef = useRef<number>(0);
+  const audioBufferMapRef = useRef<{[key: number]: AudioBuffer}>({});
 
   const WEBSOCKET_URL = 'ws://localhost:6543/voice/ws/browser/stream';
   const CHUNK_DURATION_MS = 1000;
@@ -63,7 +69,11 @@ export function AIVoiceInputDemo() {
     setLogs([]);
     setError(null);
     setIsConnecting(true);
-    audioChunksRef.current = []; // Reset audio chunks for new recording
+    audioChunksRef.current = [];
+    nextSeqToPlayRef.current = 0;
+    audioBufferMapRef.current = {};
+    playbackQueueRef.current = [];
+    isPlayingRef.current = false;
     
     appendLog('Starting audio recording...');
     
@@ -79,7 +89,7 @@ export function AIVoiceInputDemo() {
       };
       
       currentRecordingRef.current = newRecording;
-      setRecordings(prev => [newRecording, ...prev.slice(0, 9)]); // Keep last 10 recordings
+      setRecordings(prev => [newRecording, ...prev.slice(0, 9)]);
       
       await initWebSocket();
     } catch (err) {
@@ -113,21 +123,33 @@ export function AIVoiceInputDemo() {
     setIsListening(false);
     connectionAttemptInProgress.current = false;
     
-    // Create final audio blob from chunks
-    if (audioChunksRef.current.length > 0 && currentRecordingRef.current) {
-      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+    // Stop MediaRecorder and create final audio blob
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+    
+    // Create final audio blob from chunks when MediaRecorder stops
+    if (currentRecordingRef.current) {
+      const recordingId = currentRecordingRef.current.id;
       
-      setRecordings(prev => prev.map(r => 
-        r.id === currentRecordingRef.current?.id 
-          ? { ...r, duration, status: 'success', audioBlob }
-          : r
-      ));
-    } else if (currentRecordingRef.current) {
-      setRecordings(prev => prev.map(r => 
-        r.id === currentRecordingRef.current?.id 
-          ? { ...r, duration, status: 'success' }
-          : r
-      ));
+      // Wait for MediaRecorder to stop and process final chunks
+      setTimeout(() => {
+        if (audioChunksRef.current.length > 0) {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          
+          setRecordings(prev => prev.map(r => 
+            r.id === recordingId 
+              ? { ...r, duration, status: 'success', audioBlob }
+              : r
+          ));
+        } else {
+          setRecordings(prev => prev.map(r => 
+            r.id === recordingId 
+              ? { ...r, duration, status: 'success' }
+              : r
+          ));
+        }
+      }, 100);
     }
     
     currentRecordingRef.current = null;
@@ -196,9 +218,76 @@ export function AIVoiceInputDemo() {
         } else if (message.event === 'media' && message.media?.payload) {
           const seq = message.media.seq;
           appendLog(`Received audio chunk, seq=${seq}`);
+          
+          // Handle incoming audio for playback
+          const base64 = message.media.payload;
+          const audioBytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+          
+          if (audioContextRef.current) {
+            try {
+              const audioBuffer = await audioContextRef.current.decodeAudioData(audioBytes.buffer);
+              audioBufferMapRef.current[seq] = audioBuffer;
+              tryPlayInOrder();
+            } catch (error) {
+              console.error('Error decoding audio:', error);
+            }
+          }
         }
       };
     });
+  };
+
+  const tryPlayInOrder = () => {
+    while (audioBufferMapRef.current[nextSeqToPlayRef.current]) {
+      enqueueAudioBuffer(audioBufferMapRef.current[nextSeqToPlayRef.current]);
+      delete audioBufferMapRef.current[nextSeqToPlayRef.current];
+      nextSeqToPlayRef.current++;
+    }
+  };
+
+  const enqueueAudioBuffer = (audioBuffer: AudioBuffer) => {
+    playbackQueueRef.current.push(audioBuffer);
+    if (!isPlayingRef.current) {
+      playNextFromQueue();
+    }
+  };
+
+  const playNextFromQueue = async () => {
+    if (playbackQueueRef.current.length === 0) {
+      isPlayingRef.current = false;
+      return;
+    }
+
+    const buffer = playbackQueueRef.current.shift();
+    if (!buffer || !audioContextRef.current) return;
+
+    const source = audioContextRef.current.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContextRef.current.destination);
+
+    isPlayingRef.current = true;
+    appendLog('Starting TTS playback - muting microphone');
+
+    // 🔇 Pause MediaRecorder during playback
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.pause();
+      appendLog('Microphone paused during TTS playback');
+    }
+
+    source.onended = () => {
+      appendLog('TTS playback ended - resuming microphone');
+
+      // ▶️ Resume mic after playback
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
+        mediaRecorderRef.current.resume();
+        appendLog('Microphone resumed after TTS playback');
+      }
+
+      isPlayingRef.current = false;
+      playNextFromQueue(); // play next in queue
+    };
+
+    source.start(0);
   };
 
   const initAudioCapture = async () => {
@@ -213,7 +302,7 @@ export function AIVoiceInputDemo() {
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          // Store audio chunk locally for MP3 download
+          // Store audio chunk locally for download
           audioChunksRef.current.push(event.data);
           
           // Also send to WebSocket if connected
@@ -277,6 +366,8 @@ export function AIVoiceInputDemo() {
     mediaRecorderRef.current = null;
     audioContextRef.current = null;
     webSocketRef.current = null;
+    playbackQueueRef.current = [];
+    isPlayingRef.current = false;
   };
 
   const stopListening = () => {
@@ -287,7 +378,6 @@ export function AIVoiceInputDemo() {
   };
 
   const clearAllRecordings = () => {
-    // Stop any playing audio
     if (currentAudioRef.current) {
       currentAudioRef.current.pause();
       currentAudioRef.current = null;
@@ -322,7 +412,7 @@ export function AIVoiceInputDemo() {
 
   const downloadIndividualRecording = (recording: Recording) => {
     if (recording.audioBlob) {
-      // Download as MP3/WebM audio file
+      // Download as WebM audio file (not MP3, but audio format)
       const url = URL.createObjectURL(recording.audioBlob);
       const link = document.createElement("a");
       link.href = url;
