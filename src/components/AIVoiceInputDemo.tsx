@@ -41,7 +41,7 @@ export function AIVoiceInputDemo() {
   const audioChunksRef = useRef<Blob[]>([]);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   
-  // New refs for full conversation recording
+  // Full conversation recording refs
   const playbackQueueRef = useRef<AudioBuffer[]>([]);
   const isPlayingRef = useRef<boolean>(false);
   const nextSeqToPlayRef = useRef<number>(0);
@@ -216,11 +216,15 @@ export function AIVoiceInputDemo() {
         try {
           message = JSON.parse(event.data);
         } catch (e) {
+          // It's likely a raw log string from server
           appendLog(`[Server]: ${event.data}`);
           return;
         }
 
+        console.log("[LOG] Message received from server:", message);
+
         if (message.type === 'log') {
+          // Server log messages
           appendLog(`[Server]: ${message.message}`);
         } else if (message.event === 'media' && message.media?.payload) {
           const seq = message.media.seq;
@@ -236,8 +240,12 @@ export function AIVoiceInputDemo() {
               tryPlayInOrder();
             } catch (error) {
               console.error('Error decoding audio:', error);
+              appendLog('Error decoding audio from server', 'error');
             }
           }
+        } else {
+          // Handle any other unrecognized messages
+          appendLog(`[Unhandled]: ${JSON.stringify(message)}`, 'warning');
         }
       };
     });
@@ -277,8 +285,21 @@ export function AIVoiceInputDemo() {
     isPlayingRef.current = true;
     appendLog('Starting TTS playback - recording continues');
 
+    // Pause microphone recording during TTS playback
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.pause();
+      appendLog('Mic paused during TTS playback');
+    }
+
     source.onended = () => {
       appendLog('TTS playback ended');
+      
+      // Resume microphone recording after TTS playback
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
+        mediaRecorderRef.current.resume();
+        appendLog('Mic resumed after TTS');
+      }
+      
       isPlayingRef.current = false;
       playNextFromQueue();
     };
@@ -349,7 +370,7 @@ export function AIVoiceInputDemo() {
                 }
               };
               webSocketRef.current?.send(JSON.stringify(message));
-              appendLog('Audio chunk sent to server');
+              appendLog('Audio chunk sent to server using websocket');
             };
             reader.readAsDataURL(event.data);
           }
@@ -677,7 +698,7 @@ export function AIVoiceInputDemo() {
           <CardHeader className="flex flex-row items-center justify-between">
             <div>
               <CardTitle>Live Logs</CardTitle>
-              <CardDescription>Real-time system logs (only when recording)</CardDescription>
+              <CardDescription>Real-time system logs (both browser and server logs)</CardDescription>
             </div>
             <Button variant="outline" size="sm" onClick={clearLogs}>
               Clear Logs
