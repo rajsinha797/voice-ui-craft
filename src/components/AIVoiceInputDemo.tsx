@@ -1,11 +1,10 @@
-
 import { AIVoiceInput } from "@/components/ui/ai-voice-input";
 import { useState, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Download, AlertCircle, CheckCircle } from "lucide-react";
+import { Download, AlertCircle, CheckCircle, Trash2 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
 interface Recording {
@@ -37,12 +36,13 @@ export function AIVoiceInputDemo() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamIdRef = useRef<string>('');
   const currentRecordingRef = useRef<Recording | null>(null);
+  const connectionAttemptInProgress = useRef<boolean>(false);
 
   const WEBSOCKET_URL = 'ws://localhost:6543/voice/ws/browser/stream';
   const CHUNK_DURATION_MS = 1000;
 
   const appendLog = (message: string, type: 'info' | 'error' | 'warning' = 'info') => {
-    if (!isListening && !isConnecting) return; // Only log when actively listening or connecting
+    if (!isListening && !isConnecting) return;
     
     const timestamp = new Date().toISOString().replace('T', ' ').replace('Z', '').slice(0, 23);
     setLogs(prev => [...prev, { timestamp, type, message }]);
@@ -51,12 +51,13 @@ export function AIVoiceInputDemo() {
 
   const handleStart = async () => {
     // Prevent multiple simultaneous connection attempts
-    if (isConnecting || isListening || webSocketRef.current) {
+    if (isConnecting || isListening || connectionAttemptInProgress.current) {
       console.log('[INFO] Connection attempt blocked - already connecting or listening');
       return;
     }
 
-    // Clear previous logs when starting new session
+    // Set flag to prevent multiple attempts
+    connectionAttemptInProgress.current = true;
     setLogs([]);
     setError(null);
     setIsConnecting(true);
@@ -64,11 +65,9 @@ export function AIVoiceInputDemo() {
     appendLog('Starting audio recording...');
     
     try {
-      // Generate new recording ID - only create ONE recording
       const recordingId = crypto.randomUUID();
       streamIdRef.current = crypto.randomUUID();
       
-      // Create new recording entry
       const newRecording: Recording = {
         id: recordingId,
         duration: 0,
@@ -77,30 +76,43 @@ export function AIVoiceInputDemo() {
       };
       
       currentRecordingRef.current = newRecording;
-      setRecordings(prev => [newRecording, ...prev.slice(0, 4)]);
+      setRecordings(prev => [newRecording, ...prev.slice(0, 9)]); // Keep last 10 recordings
       
       await initWebSocket();
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+      const errorMessage = err instanceof Error ? err.message : 'WebSocket connection failed';
       appendLog(`Failed to start recording: ${errorMessage}`, 'error');
       setError(errorMessage);
-      setIsConnecting(false);
-      setIsListening(false);
       
-      if (currentRecordingRef.current) {
-        setRecordings(prev => prev.map(r => 
-          r.id === currentRecordingRef.current?.id 
-            ? { ...r, status: 'error', error: errorMessage }
-            : r
-        ));
-      }
+      // Stop everything and mark recording as failed
+      handleConnectionFailure(errorMessage);
     }
+  };
+
+  const handleConnectionFailure = (errorMessage: string) => {
+    setIsConnecting(false);
+    setIsListening(false);
+    connectionAttemptInProgress.current = false;
+    
+    // Mark current recording as failed
+    if (currentRecordingRef.current) {
+      setRecordings(prev => prev.map(r => 
+        r.id === currentRecordingRef.current?.id 
+          ? { ...r, status: 'error', error: errorMessage }
+          : r
+      ));
+      currentRecordingRef.current = null;
+    }
+    
+    // Clean up all resources
+    cleanupResources();
   };
 
   const handleStop = (duration: number) => {
     appendLog(`Stopping recording after ${duration} seconds`);
     setIsConnecting(false);
     setIsListening(false);
+    connectionAttemptInProgress.current = false;
     stopListening();
     
     if (currentRecordingRef.current) {
@@ -115,9 +127,8 @@ export function AIVoiceInputDemo() {
 
   const initWebSocket = async () => {
     return new Promise<void>((resolve, reject) => {
-      // Check if already connecting or connected
+      // Ensure no existing connection
       if (webSocketRef.current) {
-        appendLog('WebSocket already exists, cleaning up first...', 'warning');
         webSocketRef.current.close();
         webSocketRef.current = null;
       }
@@ -128,24 +139,38 @@ export function AIVoiceInputDemo() {
       const webSocket = new WebSocket(wsUrlWithStreamId);
       webSocketRef.current = webSocket;
 
+      // Set a connection timeout
+      const connectionTimeout = setTimeout(() => {
+        if (webSocket.readyState === WebSocket.CONNECTING) {
+          webSocket.close();
+          reject(new Error('WebSocket connection timeout'));
+        }
+      }, 10000); // 10 second timeout
+
       webSocket.onopen = () => {
+        clearTimeout(connectionTimeout);
         appendLog('WebSocket connected. Requesting microphone access...');
         setIsConnecting(false);
         setIsListening(true);
+        connectionAttemptInProgress.current = false;
         initAudioCapture().then(resolve).catch(reject);
       };
 
       webSocket.onclose = (event) => {
+        clearTimeout(connectionTimeout);
         appendLog(`WebSocket closed: ${event.reason || 'No reason given'} (Code: ${event.code})`, 'warning');
         setIsConnecting(false);
         setIsListening(false);
+        connectionAttemptInProgress.current = false;
         webSocketRef.current = null;
       };
 
       webSocket.onerror = (error) => {
+        clearTimeout(connectionTimeout);
         appendLog('WebSocket connection failed', 'error');
         setIsConnecting(false);
         setIsListening(false);
+        connectionAttemptInProgress.current = false;
         webSocketRef.current = null;
         reject(new Error('WebSocket connection failed'));
       };
@@ -210,7 +235,7 @@ export function AIVoiceInputDemo() {
 
       mediaRecorder.onerror = (event) => {
         appendLog(`MediaRecorder error: ${(event as any).error.name}`, 'error');
-        stopListening();
+        handleConnectionFailure(`MediaRecorder error: ${(event as any).error.name}`);
       };
 
       mediaRecorder.start(CHUNK_DURATION_MS);
@@ -221,7 +246,7 @@ export function AIVoiceInputDemo() {
     }
   };
 
-  const stopListening = () => {
+  const cleanupResources = () => {
     appendLog('Cleaning up audio resources...');
     
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
@@ -236,11 +261,22 @@ export function AIVoiceInputDemo() {
       webSocketRef.current.close(1000, "Client initiated stop");
     }
 
-    setIsConnecting(false);
-    setIsListening(false);
     mediaRecorderRef.current = null;
     audioContextRef.current = null;
     webSocketRef.current = null;
+  };
+
+  const stopListening = () => {
+    cleanupResources();
+    setIsConnecting(false);
+    setIsListening(false);
+    connectionAttemptInProgress.current = false;
+  };
+
+  const clearAllRecordings = () => {
+    setRecordings([]);
+    setLogs([]);
+    setError(null);
   };
 
   const formatDuration = (seconds: number) => {
@@ -354,18 +390,29 @@ export function AIVoiceInputDemo() {
               <div>
                 <CardTitle>Recording History</CardTitle>
                 <CardDescription>
-                  Your recent voice recordings
+                  Your recent voice recordings (last 10)
                 </CardDescription>
               </div>
-              <Button 
-                variant="outline" 
-                size="sm" 
-                onClick={downloadRecordingHistory}
-                className="flex items-center gap-2"
-              >
-                <Download className="w-4 h-4" />
-                Download All
-              </Button>
+              <div className="flex gap-2">
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={clearAllRecordings}
+                  className="flex items-center gap-2"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Clear All
+                </Button>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={downloadRecordingHistory}
+                  className="flex items-center gap-2"
+                >
+                  <Download className="w-4 h-4" />
+                  Download All
+                </Button>
+              </div>
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
