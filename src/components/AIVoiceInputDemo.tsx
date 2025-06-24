@@ -1,10 +1,16 @@
-
 import { useState, useRef, useEffect } from 'react';
 import { AIVoiceInput } from '@/components/ui/ai-voice-input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Mic, MicOff, Volume2 } from 'lucide-react';
+
+// Extend Window interface to include webkitAudioContext
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
 
 const AIVoiceInputDemo = () => {
   const [isListening, setIsListening] = useState(false);
@@ -47,8 +53,13 @@ const AIVoiceInputDemo = () => {
         addLog("[Browser] Previous WebSocket connection closed");
       }
 
-      // Create new AudioContext
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      // Create new AudioContext with proper fallback
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (AudioContextClass) {
+        audioContextRef.current = new AudioContextClass();
+      } else {
+        throw new Error('AudioContext not supported in this browser');
+      }
       
       // Generate random stream ID
       streamIdRef.current = crypto.randomUUID();
