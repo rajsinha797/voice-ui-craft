@@ -44,7 +44,8 @@ export function AIVoiceInputDemo() {
   // Duration tracking refs
   const conversationStartTimeRef = useRef<number | null>(null);
   const conversationDurationRef = useRef<number>(0);
-  const cleanupInProgress = useRef<boolean>(false); // Add this to prevent multiple cleanups
+  const cleanupInProgress = useRef<boolean>(false);
+  const durationUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
   // Full conversation recording refs
   const playbackQueueRef = useRef<AudioBuffer[]>([]);
@@ -71,15 +72,44 @@ export function AIVoiceInputDemo() {
     console.log(`[${type.toUpperCase()}] ${message}`);
   };
 
+  // Start continuous duration update
+  const startDurationTracking = () => {
+    if (durationUpdateIntervalRef.current) {
+      clearInterval(durationUpdateIntervalRef.current);
+    }
+    
+    conversationStartTimeRef.current = Date.now();
+    conversationDurationRef.current = 0;
+    
+    durationUpdateIntervalRef.current = setInterval(() => {
+      if (conversationStartTimeRef.current) {
+        conversationDurationRef.current = Math.floor((Date.now() - conversationStartTimeRef.current) / 1000);
+      }
+    }, 1000);
+  };
+
+  // Stop duration tracking
+  const stopDurationTracking = () => {
+    if (durationUpdateIntervalRef.current) {
+      clearInterval(durationUpdateIntervalRef.current);
+      durationUpdateIntervalRef.current = null;
+    }
+    
+    if (conversationStartTimeRef.current) {
+      conversationDurationRef.current = Math.floor((Date.now() - conversationStartTimeRef.current) / 1000);
+    }
+  };
+
   const handleStart = async () => {
     if (isConnecting || isListening || connectionAttemptInProgress.current) {
       console.log('[INFO] Connection attempt blocked - already connecting or listening');
       return;
     }
 
+    // Reset all state for new recording
     connectionAttemptInProgress.current = true;
-    cleanupInProgress.current = false; // Reset cleanup flag
-    setLogs([]);
+    cleanupInProgress.current = false;
+    setLogs([]); // Clear logs for new recording
     setError(null);
     setIsConnecting(true);
     audioChunksRef.current = [];
@@ -88,11 +118,10 @@ export function AIVoiceInputDemo() {
     playbackQueueRef.current = [];
     isPlayingRef.current = false;
     
-    // Start conversation timer
-    conversationStartTimeRef.current = Date.now();
-    conversationDurationRef.current = 0;
+    // Start duration tracking
+    startDurationTracking();
     
-    appendLog('Starting audio recording...');
+    appendLog('Starting new audio recording...');
     
     try {
       const recordingId = crypto.randomUUID();
@@ -122,10 +151,8 @@ export function AIVoiceInputDemo() {
     setIsListening(false);
     connectionAttemptInProgress.current = false;
     
-    // Calculate final duration
-    if (conversationStartTimeRef.current) {
-      conversationDurationRef.current = Math.floor((Date.now() - conversationStartTimeRef.current) / 1000);
-    }
+    // Stop duration tracking and get final duration
+    stopDurationTracking();
     
     if (currentRecordingRef.current) {
       setRecordings(prev => prev.map(r => 
@@ -145,12 +172,10 @@ export function AIVoiceInputDemo() {
       return;
     }
     
-    appendLog(`Stopping recording after ${duration} seconds`);
+    appendLog(`Stopping recording after ${conversationDurationRef.current} seconds`);
     
-    // Calculate actual conversation duration
-    if (conversationStartTimeRef.current) {
-      conversationDurationRef.current = Math.floor((Date.now() - conversationStartTimeRef.current) / 1000);
-    }
+    // Stop duration tracking
+    stopDurationTracking();
     
     setIsConnecting(false);
     setIsListening(false);
@@ -247,7 +272,6 @@ export function AIVoiceInputDemo() {
         try {
           message = JSON.parse(event.data);
         } catch (e) {
-          // It's likely a raw log string from server
           appendLog(`[Server]: ${event.data}`);
           return;
         }
@@ -255,7 +279,6 @@ export function AIVoiceInputDemo() {
         console.log("[LOG] Message received from server:", message);
 
         if (message.type === 'log') {
-          // Server log messages
           appendLog(`[Server]: ${message.message}`);
         } else if (message.event === 'media' && message.media?.payload) {
           const seq = message.media.seq;
@@ -275,7 +298,6 @@ export function AIVoiceInputDemo() {
             }
           }
         } else {
-          // Handle any other unrecognized messages
           appendLog(`[Unhandled]: ${JSON.stringify(message)}`, 'warning');
         }
       };
@@ -309,14 +331,12 @@ export function AIVoiceInputDemo() {
     const source = audioContextRef.current.createBufferSource();
     source.buffer = buffer;
     
-    // Connect TTS audio to mixer so it gets recorded in full conversation
     source.connect(mixerNodeRef.current);
-    source.connect(audioContextRef.current.destination); // Also play through speakers
+    source.connect(audioContextRef.current.destination);
 
     isPlayingRef.current = true;
     appendLog('Starting TTS playback - recording continues');
 
-    // Pause microphone recording during TTS playback
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.pause();
       appendLog('Mic paused during TTS playback');
@@ -325,7 +345,6 @@ export function AIVoiceInputDemo() {
     source.onended = () => {
       appendLog('TTS playback ended');
       
-      // Resume microphone recording after TTS playback
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
         mediaRecorderRef.current.resume();
         appendLog('Mic resumed after TTS');
@@ -343,21 +362,16 @@ export function AIVoiceInputDemo() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       appendLog('Microphone access granted. Setting up full conversation recording...');
 
-      // Create audio context and mixer for full conversation recording
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       
-      // Create mixer node to combine microphone and TTS audio
       mixerNodeRef.current = audioContextRef.current.createGain();
       
-      // Create destination stream for full conversation recording
       destinationStreamRef.current = audioContextRef.current.createMediaStreamDestination();
       mixerNodeRef.current.connect(destinationStreamRef.current);
       
-      // Connect microphone to mixer
       micSourceRef.current = audioContextRef.current.createMediaStreamSource(stream);
       micSourceRef.current.connect(mixerNodeRef.current);
       
-      // Set up full conversation recorder
       fullConversationRecorderRef.current = new MediaRecorder(destinationStreamRef.current.stream);
       
       fullConversationRecorderRef.current.ondataavailable = (event) => {
@@ -379,10 +393,8 @@ export function AIVoiceInputDemo() {
         appendLog(`Full conversation recorder error: ${(event as any).error.name}`, 'error');
       };
 
-      // Start full conversation recording
       fullConversationRecorderRef.current.start(CHUNK_DURATION_MS);
       
-      // Set up separate MediaRecorder for WebSocket streaming (microphone only)
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
 
@@ -432,13 +444,15 @@ export function AIVoiceInputDemo() {
   };
 
   const cleanupResources = () => {
-    // Prevent multiple cleanup calls
     if (cleanupInProgress.current) {
       return;
     }
     
     cleanupInProgress.current = true;
     appendLog('Cleaning up audio resources...');
+    
+    // Stop duration tracking
+    stopDurationTracking();
     
     if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
       fullConversationRecorderRef.current.stop();

@@ -1,3 +1,4 @@
+
 "use client";
 
 import { Mic } from "lucide-react";
@@ -39,24 +40,15 @@ export function AIVoiceInput({
     setSubmitted(isRecording);
   }, [isRecording]);
 
-  // Use actualDuration if provided, otherwise use internal time
-  const displayTime = actualDuration > 0 ? actualDuration : time;
+  // Always use actualDuration when provided, otherwise fall back to internal time
+  const displayTime = actualDuration;
 
+  // Remove the internal timer completely since we're using actualDuration
   useEffect(() => {
-    let intervalId: NodeJS.Timeout;
-
-    if (submitted && !actualDuration) {
-      onStart?.();
-      intervalId = setInterval(() => {
-        setTime((t) => t + 1);
-      }, 1000);
-    } else if (!submitted) {
-      onStop?.(time);
+    if (!submitted) {
       setTime(0);
     }
-
-    return () => clearInterval(intervalId);
-  }, [submitted, actualDuration, time, onStart, onStop]);
+  }, [submitted]);
 
   useEffect(() => {
     if (!isDemo) return;
@@ -88,7 +80,11 @@ export function AIVoiceInput({
       setIsDemo(false);
       setSubmitted(false);
     } else {
-      setSubmitted((prev) => !prev);
+      if (submitted) {
+        onStop?.(displayTime);
+      } else {
+        onStart?.();
+      }
     }
   };
 
