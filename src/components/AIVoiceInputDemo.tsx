@@ -1,11 +1,13 @@
+
 import { AIVoiceInput } from "@/components/ui/ai-voice-input";
 import { useState, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Download, AlertCircle, CheckCircle, Trash2, Play, Pause } from "lucide-react";
+import { Download, AlertCircle, CheckCircle, Trash2, Play, Pause, FileText } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 
 interface Recording {
   id: string;
@@ -14,6 +16,7 @@ interface Recording {
   status: 'success' | 'error' | 'processing';
   audioBlob?: Blob;
   error?: string;
+  logs?: LogEntry[]; // Add logs to recording
 }
 
 interface LogEntry {
@@ -60,13 +63,20 @@ export function AIVoiceInputDemo() {
   const WEBSOCKET_URL = 'ws://localhost:6543/voice/ws/browser/stream';
   const CHUNK_DURATION_MS = 1000;
 
+  // Store logs for current recording
+  const currentRecordingLogsRef = useRef<LogEntry[]>([]);
+
   // Fixed appendLog function - removed restrictive guard clause
   const appendLog = (message: string, type: 'info' | 'error' | 'warning' = 'info') => {
     const timestamp = new Date().toISOString().replace('T', ' ').replace('Z', '').slice(0, 23);
     
+    const logEntry: LogEntry = { timestamp, type, message };
+    
     // Use async state update to prevent blocking
     setTimeout(() => {
-      setLogs(prev => [...prev, { timestamp, type, message }]);
+      setLogs(prev => [...prev, logEntry]);
+      // Also store in current recording logs
+      currentRecordingLogsRef.current.push(logEntry);
     }, 0);
     
     console.log(`[${type.toUpperCase()}] ${message}`);
@@ -110,6 +120,7 @@ export function AIVoiceInputDemo() {
     connectionAttemptInProgress.current = true;
     cleanupInProgress.current = false;
     setLogs([]); // Clear logs for new recording
+    currentRecordingLogsRef.current = []; // Clear logs for current recording
     setError(null);
     setIsConnecting(true);
     audioChunksRef.current = [];
@@ -131,7 +142,8 @@ export function AIVoiceInputDemo() {
         id: recordingId,
         duration: 0,
         timestamp: new Date(),
-        status: 'processing'
+        status: 'processing',
+        logs: [] // Initialize empty logs
       };
       
       currentRecordingRef.current = newRecording;
@@ -155,9 +167,10 @@ export function AIVoiceInputDemo() {
     stopDurationTracking();
     
     if (currentRecordingRef.current) {
+      const recordingLogs = [...currentRecordingLogsRef.current]; // Copy current logs
       setRecordings(prev => prev.map(r => 
         r.id === currentRecordingRef.current?.id 
-          ? { ...r, status: 'error', error: errorMessage, duration: conversationDurationRef.current }
+          ? { ...r, status: 'error', error: errorMessage, duration: conversationDurationRef.current, logs: recordingLogs }
           : r
       ));
       currentRecordingRef.current = null;
@@ -195,6 +208,7 @@ export function AIVoiceInputDemo() {
     if (currentRecordingRef.current) {
       const recordingId = currentRecordingRef.current.id;
       const finalDuration = conversationDurationRef.current;
+      const recordingLogs = [...currentRecordingLogsRef.current]; // Copy current logs
       
       setTimeout(() => {
         if (audioChunksRef.current.length > 0) {
@@ -202,13 +216,13 @@ export function AIVoiceInputDemo() {
           
           setRecordings(prev => prev.map(r => 
             r.id === recordingId 
-              ? { ...r, duration: finalDuration, status: 'success', audioBlob }
+              ? { ...r, duration: finalDuration, status: 'success', audioBlob, logs: recordingLogs }
               : r
           ));
         } else {
           setRecordings(prev => prev.map(r => 
             r.id === recordingId 
-              ? { ...r, duration: finalDuration, status: 'success' }
+              ? { ...r, duration: finalDuration, status: 'success', logs: recordingLogs }
               : r
           ));
         }
@@ -562,6 +576,26 @@ export function AIVoiceInputDemo() {
     }
   };
 
+  const downloadLogs = (recording: Recording) => {
+    if (!recording.logs || recording.logs.length === 0) {
+      return;
+    }
+
+    const logsText = recording.logs
+      .map(log => `[${log.timestamp}] [${log.type.toUpperCase()}] ${log.message}`)
+      .join('\n');
+    
+    const blob = new Blob([logsText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `logs_${recording.id.slice(0, 8)}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const playRecording = (recording: Recording) => {
     if (!recording.audioBlob) return;
 
@@ -726,6 +760,52 @@ export function AIVoiceInputDemo() {
                               <Play className="w-3 h-3" />
                             )}
                           </Button>
+                        )}
+                        {recording.logs && recording.logs.length > 0 && (
+                          <Dialog>
+                            <DialogTrigger asChild>
+                              <Button 
+                                variant="outline" 
+                                size="sm" 
+                                className="flex items-center gap-1"
+                              >
+                                <FileText className="w-3 h-3" />
+                              </Button>
+                            </DialogTrigger>
+                            <DialogContent className="max-w-4xl max-h-[80vh]">
+                              <DialogHeader>
+                                <DialogTitle>Recording Logs</DialogTitle>
+                                <DialogDescription>
+                                  Logs for recording #{recordings.length - index} - {recording.timestamp.toLocaleString()}
+                                </DialogDescription>
+                              </DialogHeader>
+                              <div className="flex justify-between items-center mb-4">
+                                <span className="text-sm text-muted-foreground">
+                                  {recording.logs.length} log entries
+                                </span>
+                                <Button 
+                                  variant="outline" 
+                                  size="sm" 
+                                  onClick={() => downloadLogs(recording)}
+                                  className="flex items-center gap-2"
+                                >
+                                  <Download className="w-4 h-4" />
+                                  Download Logs
+                                </Button>
+                              </div>
+                              <div className="space-y-1 max-h-96 overflow-y-auto font-mono text-sm border rounded-lg p-4">
+                                {recording.logs.map((log, logIndex) => (
+                                  <div key={logIndex} className={`p-2 rounded text-xs border-l-2 ${
+                                    log.type === 'error' ? 'border-red-500 bg-red-50 text-red-700' :
+                                    log.type === 'warning' ? 'border-yellow-500 bg-yellow-50 text-yellow-700' :
+                                    'border-blue-500 bg-blue-50 text-blue-700'
+                                  }`}>
+                                    <span className="text-gray-500">[{log.timestamp}]</span> {log.message}
+                                  </div>
+                                ))}
+                              </div>
+                            </DialogContent>
+                          </Dialog>
                         )}
                         <Button 
                           variant="outline" 
