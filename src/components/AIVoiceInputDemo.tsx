@@ -41,6 +41,10 @@ export function AIVoiceInputDemo() {
   const audioChunksRef = useRef<Blob[]>([]);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   
+  // Duration tracking refs
+  const conversationStartTimeRef = useRef<number | null>(null);
+  const conversationDurationRef = useRef<number>(0);
+  
   // Full conversation recording refs
   const playbackQueueRef = useRef<AudioBuffer[]>([]);
   const isPlayingRef = useRef<boolean>(false);
@@ -54,11 +58,15 @@ export function AIVoiceInputDemo() {
   const WEBSOCKET_URL = 'ws://localhost:6543/voice/ws/browser/stream';
   const CHUNK_DURATION_MS = 1000;
 
+  // Fixed appendLog function - removed restrictive guard clause
   const appendLog = (message: string, type: 'info' | 'error' | 'warning' = 'info') => {
-    if (!isListening && !isConnecting) return;
-    
     const timestamp = new Date().toISOString().replace('T', ' ').replace('Z', '').slice(0, 23);
-    setLogs(prev => [...prev, { timestamp, type, message }]);
+    
+    // Use async state update to prevent blocking
+    setTimeout(() => {
+      setLogs(prev => [...prev, { timestamp, type, message }]);
+    }, 0);
+    
     console.log(`[${type.toUpperCase()}] ${message}`);
   };
 
@@ -77,6 +85,10 @@ export function AIVoiceInputDemo() {
     audioBufferMapRef.current = {};
     playbackQueueRef.current = [];
     isPlayingRef.current = false;
+    
+    // Start conversation timer
+    conversationStartTimeRef.current = Date.now();
+    conversationDurationRef.current = 0;
     
     appendLog('Starting audio recording...');
     
@@ -108,10 +120,15 @@ export function AIVoiceInputDemo() {
     setIsListening(false);
     connectionAttemptInProgress.current = false;
     
+    // Calculate final duration
+    if (conversationStartTimeRef.current) {
+      conversationDurationRef.current = Math.floor((Date.now() - conversationStartTimeRef.current) / 1000);
+    }
+    
     if (currentRecordingRef.current) {
       setRecordings(prev => prev.map(r => 
         r.id === currentRecordingRef.current?.id 
-          ? { ...r, status: 'error', error: errorMessage }
+          ? { ...r, status: 'error', error: errorMessage, duration: conversationDurationRef.current }
           : r
       ));
       currentRecordingRef.current = null;
@@ -122,6 +139,12 @@ export function AIVoiceInputDemo() {
 
   const handleStop = (duration: number) => {
     appendLog(`Stopping recording after ${duration} seconds`);
+    
+    // Calculate actual conversation duration
+    if (conversationStartTimeRef.current) {
+      conversationDurationRef.current = Math.floor((Date.now() - conversationStartTimeRef.current) / 1000);
+    }
+    
     setIsConnecting(false);
     setIsListening(false);
     connectionAttemptInProgress.current = false;
@@ -139,6 +162,7 @@ export function AIVoiceInputDemo() {
     // Update recording status when full conversation recording completes
     if (currentRecordingRef.current) {
       const recordingId = currentRecordingRef.current.id;
+      const finalDuration = conversationDurationRef.current;
       
       setTimeout(() => {
         if (audioChunksRef.current.length > 0) {
@@ -146,13 +170,13 @@ export function AIVoiceInputDemo() {
           
           setRecordings(prev => prev.map(r => 
             r.id === recordingId 
-              ? { ...r, duration, status: 'success', audioBlob }
+              ? { ...r, duration: finalDuration, status: 'success', audioBlob }
               : r
           ));
         } else {
           setRecordings(prev => prev.map(r => 
             r.id === recordingId 
-              ? { ...r, duration, status: 'success' }
+              ? { ...r, duration: finalDuration, status: 'success' }
               : r
           ));
         }
