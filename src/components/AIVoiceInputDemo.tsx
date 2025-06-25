@@ -853,7 +853,7 @@ export function AIVoiceInputDemo() {
                   {isListening || isConnecting ? "Waiting for logs..." : "Click 'Click to speak' to see logs..."}
                 </div>
               ) : (
-                logs.slice(-50).map((log, index) => (
+                logs.map((log, index) => (
                   <div key={index} className={`p-2 rounded text-xs border-l-2 ${getLogItemStyle(log)}`}>
                     <span className="text-gray-500">[{log.timestamp}]</span> {log.message}
                   </div>
