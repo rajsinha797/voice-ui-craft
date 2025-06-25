@@ -1,4 +1,3 @@
-
 import { AIVoiceInput } from "@/components/ui/ai-voice-input";
 import { useState, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,12 +15,13 @@ interface Recording {
   status: 'success' | 'error' | 'processing';
   audioBlob?: Blob;
   error?: string;
-  logs?: LogEntry[]; // Add logs to recording
+  logs?: LogEntry[];
 }
 
 interface LogEntry {
   timestamp: string;
   type: 'info' | 'error' | 'warning';
+  source: 'server' | 'browser'; // Add source to distinguish log origin
   message: string;
 }
 
@@ -66,11 +66,14 @@ export function AIVoiceInputDemo() {
   // Store logs for current recording
   const currentRecordingLogsRef = useRef<LogEntry[]>([]);
 
-  // Fixed appendLog function - removed restrictive guard clause
-  const appendLog = (message: string, type: 'info' | 'error' | 'warning' = 'info') => {
+  // Updated appendLog function with source parameter
+  const appendLog = (message: string, type: 'info' | 'error' | 'warning' = 'info', source: 'server' | 'browser' = 'browser') => {
     const timestamp = new Date().toISOString().replace('T', ' ').replace('Z', '').slice(0, 23);
     
-    const logEntry: LogEntry = { timestamp, type, message };
+    // Add appropriate prefix based on source
+    const prefixedMessage = source === 'server' ? `[Server]: ${message}` : `[Browser]: ${message}`;
+    
+    const logEntry: LogEntry = { timestamp, type, source, message: prefixedMessage };
     
     // Use async state update to prevent blocking
     setTimeout(() => {
@@ -79,10 +82,9 @@ export function AIVoiceInputDemo() {
       currentRecordingLogsRef.current.push(logEntry);
     }, 0);
     
-    console.log(`[${type.toUpperCase()}] ${message}`);
+    console.log(`[${type.toUpperCase()}] ${prefixedMessage}`);
   };
 
-  // Start continuous duration update
   const startDurationTracking = () => {
     if (durationUpdateIntervalRef.current) {
       clearInterval(durationUpdateIntervalRef.current);
@@ -98,7 +100,6 @@ export function AIVoiceInputDemo() {
     }, 1000);
   };
 
-  // Stop duration tracking
   const stopDurationTracking = () => {
     if (durationUpdateIntervalRef.current) {
       clearInterval(durationUpdateIntervalRef.current);
@@ -132,7 +133,7 @@ export function AIVoiceInputDemo() {
     // Start duration tracking
     startDurationTracking();
     
-    appendLog('Starting new audio recording...');
+    appendLog('Starting new audio recording...', 'info', 'browser');
     
     try {
       const recordingId = crypto.randomUUID();
@@ -152,7 +153,7 @@ export function AIVoiceInputDemo() {
       await initWebSocket();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'WebSocket connection failed';
-      appendLog(`Failed to start recording: ${errorMessage}`, 'error');
+      appendLog(`Failed to start recording: ${errorMessage}`, 'error', 'browser');
       setError(errorMessage);
       handleConnectionFailure(errorMessage);
     }
@@ -185,7 +186,7 @@ export function AIVoiceInputDemo() {
       return;
     }
     
-    appendLog(`Stopping recording after ${conversationDurationRef.current} seconds`);
+    appendLog(`Stopping recording after ${conversationDurationRef.current} seconds`, 'info', 'browser');
     
     // Stop duration tracking
     stopDurationTracking();
@@ -240,7 +241,7 @@ export function AIVoiceInputDemo() {
         webSocketRef.current = null;
       }
 
-      appendLog('Connecting to WebSocket...');
+      appendLog('Connecting to WebSocket...', 'info', 'browser');
       
       const wsUrlWithStreamId = `${WEBSOCKET_URL}?streamSid=${streamIdRef.current}&language=${selectedLanguage}`;
       const webSocket = new WebSocket(wsUrlWithStreamId);
@@ -255,7 +256,7 @@ export function AIVoiceInputDemo() {
 
       webSocket.onopen = () => {
         clearTimeout(connectionTimeout);
-        appendLog('WebSocket connected. Requesting microphone access...');
+        appendLog('WebSocket connected. Requesting microphone access...', 'info', 'browser');
         setIsConnecting(false);
         setIsListening(true);
         connectionAttemptInProgress.current = false;
@@ -264,7 +265,7 @@ export function AIVoiceInputDemo() {
 
       webSocket.onclose = (event) => {
         clearTimeout(connectionTimeout);
-        appendLog(`WebSocket closed: ${event.reason || 'No reason given'} (Code: ${event.code})`, 'warning');
+        appendLog(`WebSocket closed: ${event.reason || 'No reason given'} (Code: ${event.code})`, 'warning', 'browser');
         setIsConnecting(false);
         setIsListening(false);
         connectionAttemptInProgress.current = false;
@@ -273,7 +274,7 @@ export function AIVoiceInputDemo() {
 
       webSocket.onerror = (error) => {
         clearTimeout(connectionTimeout);
-        appendLog('WebSocket connection failed', 'error');
+        appendLog('WebSocket connection failed', 'error', 'browser');
         setIsConnecting(false);
         setIsListening(false);
         connectionAttemptInProgress.current = false;
@@ -286,17 +287,17 @@ export function AIVoiceInputDemo() {
         try {
           message = JSON.parse(event.data);
         } catch (e) {
-          appendLog(`[Server]: ${event.data}`);
+          appendLog(event.data, 'info', 'server');
           return;
         }
 
         console.log("[LOG] Message received from server:", message);
 
         if (message.type === 'log') {
-          appendLog(`[Server]: ${message.message}`);
+          appendLog(message.message, 'info', 'server');
         } else if (message.event === 'media' && message.media?.payload) {
           const seq = message.media.seq;
-          appendLog(`Received audio chunk, seq=${seq}`);
+          appendLog(`Received audio chunk, seq=${seq}`, 'info', 'server');
           
           const base64 = message.media.payload;
           const audioBytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
@@ -308,11 +309,11 @@ export function AIVoiceInputDemo() {
               tryPlayInOrder();
             } catch (error) {
               console.error('Error decoding audio:', error);
-              appendLog('Error decoding audio from server', 'error');
+              appendLog('Error decoding audio from server', 'error', 'browser');
             }
           }
         } else {
-          appendLog(`[Unhandled]: ${JSON.stringify(message)}`, 'warning');
+          appendLog(`[Unhandled]: ${JSON.stringify(message)}`, 'warning', 'server');
         }
       };
     });
@@ -349,19 +350,19 @@ export function AIVoiceInputDemo() {
     source.connect(audioContextRef.current.destination);
 
     isPlayingRef.current = true;
-    appendLog('Starting TTS playback - recording continues');
+    appendLog('Starting TTS playback - recording continues', 'info', 'browser');
 
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.pause();
-      appendLog('Mic paused during TTS playback');
+      appendLog('Mic paused during TTS playback', 'info', 'browser');
     }
 
     source.onended = () => {
-      appendLog('TTS playback ended');
+      appendLog('TTS playback ended', 'info', 'browser');
       
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
         mediaRecorderRef.current.resume();
-        appendLog('Mic resumed after TTS');
+        appendLog('Mic resumed after TTS', 'info', 'browser');
       }
       
       isPlayingRef.current = false;
@@ -374,7 +375,7 @@ export function AIVoiceInputDemo() {
   const initFullConversationRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      appendLog('Microphone access granted. Setting up full conversation recording...');
+      appendLog('Microphone access granted. Setting up full conversation recording...', 'info', 'browser');
 
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       
@@ -391,20 +392,20 @@ export function AIVoiceInputDemo() {
       fullConversationRecorderRef.current.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
-          appendLog(`Full conversation chunk recorded: ${event.data.size} bytes`);
+          appendLog(`Full conversation chunk recorded: ${event.data.size} bytes`, 'info', 'browser');
         }
       };
 
       fullConversationRecorderRef.current.onstart = () => {
-        appendLog('Full conversation recording started');
+        appendLog('Full conversation recording started', 'info', 'browser');
       };
 
       fullConversationRecorderRef.current.onstop = () => {
-        appendLog('Full conversation recording stopped');
+        appendLog('Full conversation recording stopped', 'info', 'browser');
       };
 
       fullConversationRecorderRef.current.onerror = (event) => {
-        appendLog(`Full conversation recorder error: ${(event as any).error.name}`, 'error');
+        appendLog(`Full conversation recorder error: ${(event as any).error.name}`, 'error', 'browser');
       };
 
       fullConversationRecorderRef.current.start(CHUNK_DURATION_MS);
@@ -427,7 +428,7 @@ export function AIVoiceInputDemo() {
                 }
               };
               webSocketRef.current?.send(JSON.stringify(message));
-              appendLog('Audio chunk sent to server using websocket');
+              appendLog('Audio chunk sent to server using websocket', 'info', 'browser');
             };
             reader.readAsDataURL(event.data);
           }
@@ -435,16 +436,16 @@ export function AIVoiceInputDemo() {
       };
 
       mediaRecorder.onstart = () => {
-        appendLog('WebSocket streaming started');
+        appendLog('WebSocket streaming started', 'info', 'browser');
       };
 
       mediaRecorder.onstop = () => {
-        appendLog('WebSocket streaming stopped');
+        appendLog('WebSocket streaming stopped', 'info', 'browser');
         stream.getTracks().forEach(track => track.stop());
       };
 
       mediaRecorder.onerror = (event) => {
-        appendLog(`WebSocket streaming error: ${(event as any).error.name}`, 'error');
+        appendLog(`WebSocket streaming error: ${(event as any).error.name}`, 'error', 'browser');
         handleConnectionFailure(`MediaRecorder error: ${(event as any).error.name}`);
       };
 
@@ -452,7 +453,7 @@ export function AIVoiceInputDemo() {
       
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Microphone access denied';
-      appendLog(`Error accessing microphone: ${errorMessage}`, 'error');
+      appendLog(`Error accessing microphone: ${errorMessage}`, 'error', 'browser');
       throw err;
     }
   };
@@ -463,7 +464,7 @@ export function AIVoiceInputDemo() {
     }
     
     cleanupInProgress.current = true;
-    appendLog('Cleaning up audio resources...');
+    appendLog('Cleaning up audio resources...', 'info', 'browser');
     
     // Stop duration tracking
     stopDurationTracking();
@@ -643,6 +644,18 @@ export function AIVoiceInputDemo() {
     setLogs([]);
   };
 
+  const getLogItemStyle = (log: LogEntry) => {
+    if (log.source === 'server') {
+      return log.type === 'error' ? 'border-red-500 bg-red-50 text-red-700' :
+             log.type === 'warning' ? 'border-yellow-500 bg-yellow-50 text-yellow-700' :
+             'border-blue-500 bg-blue-50 text-blue-700';
+    } else {
+      return log.type === 'error' ? 'border-red-500 bg-red-50 text-red-700' :
+             log.type === 'warning' ? 'border-orange-500 bg-orange-50 text-orange-700' :
+             'border-yellow-500 bg-yellow-50 text-yellow-700';
+    }
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
       {/* Left Side */}
@@ -795,11 +808,7 @@ export function AIVoiceInputDemo() {
                               </div>
                               <div className="space-y-1 max-h-96 overflow-y-auto font-mono text-sm border rounded-lg p-4">
                                 {recording.logs.map((log, logIndex) => (
-                                  <div key={logIndex} className={`p-2 rounded text-xs border-l-2 ${
-                                    log.type === 'error' ? 'border-red-500 bg-red-50 text-red-700' :
-                                    log.type === 'warning' ? 'border-yellow-500 bg-yellow-50 text-yellow-700' :
-                                    'border-blue-500 bg-blue-50 text-blue-700'
-                                  }`}>
+                                  <div key={logIndex} className={`p-2 rounded text-xs border-l-2 ${getLogItemStyle(log)}`}>
                                     <span className="text-gray-500">[{log.timestamp}]</span> {log.message}
                                   </div>
                                 ))}
@@ -831,7 +840,7 @@ export function AIVoiceInputDemo() {
           <CardHeader className="flex flex-row items-center justify-between">
             <div>
               <CardTitle>Live Logs</CardTitle>
-              <CardDescription>Real-time system logs (both browser and server logs)</CardDescription>
+              <CardDescription>Real-time system logs (Blue: Server, Yellow: Browser)</CardDescription>
             </div>
             <Button variant="outline" size="sm" onClick={clearLogs}>
               Clear Logs
@@ -845,11 +854,7 @@ export function AIVoiceInputDemo() {
                 </div>
               ) : (
                 logs.slice(-50).map((log, index) => (
-                  <div key={index} className={`p-2 rounded text-xs border-l-2 ${
-                    log.type === 'error' ? 'border-red-500 bg-red-50 text-red-700' :
-                    log.type === 'warning' ? 'border-yellow-500 bg-yellow-50 text-yellow-700' :
-                    'border-blue-500 bg-blue-50 text-blue-700'
-                  }`}>
+                  <div key={index} className={`p-2 rounded text-xs border-l-2 ${getLogItemStyle(log)}`}>
                     <span className="text-gray-500">[{log.timestamp}]</span> {log.message}
                   </div>
                 ))
