@@ -44,6 +44,7 @@ export function AIVoiceInputDemo() {
   // Duration tracking refs
   const conversationStartTimeRef = useRef<number | null>(null);
   const conversationDurationRef = useRef<number>(0);
+  const cleanupInProgress = useRef<boolean>(false); // Add this to prevent multiple cleanups
   
   // Full conversation recording refs
   const playbackQueueRef = useRef<AudioBuffer[]>([]);
@@ -77,6 +78,7 @@ export function AIVoiceInputDemo() {
     }
 
     connectionAttemptInProgress.current = true;
+    cleanupInProgress.current = false; // Reset cleanup flag
     setLogs([]);
     setError(null);
     setIsConnecting(true);
@@ -138,6 +140,11 @@ export function AIVoiceInputDemo() {
   };
 
   const handleStop = (duration: number) => {
+    // Prevent multiple stop calls
+    if (cleanupInProgress.current) {
+      return;
+    }
+    
     appendLog(`Stopping recording after ${duration} seconds`);
     
     // Calculate actual conversation duration
@@ -425,6 +432,12 @@ export function AIVoiceInputDemo() {
   };
 
   const cleanupResources = () => {
+    // Prevent multiple cleanup calls
+    if (cleanupInProgress.current) {
+      return;
+    }
+    
+    cleanupInProgress.current = true;
     appendLog('Cleaning up audio resources...');
     
     if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
@@ -626,6 +639,8 @@ export function AIVoiceInputDemo() {
             <AIVoiceInput 
               onStart={handleStart}
               onStop={handleStop}
+              actualDuration={conversationDurationRef.current}
+              isRecording={isListening || isConnecting}
             />
           </CardContent>
         </Card>

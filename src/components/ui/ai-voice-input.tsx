@@ -1,4 +1,3 @@
-
 "use client";
 
 import { Mic } from "lucide-react";
@@ -12,6 +11,8 @@ interface AIVoiceInputProps {
   demoMode?: boolean;
   demoInterval?: number;
   className?: string;
+  actualDuration?: number; // Add this prop to display actual conversation duration
+  isRecording?: boolean; // Add this prop to control the recording state
 }
 
 export function AIVoiceInput({
@@ -20,7 +21,9 @@ export function AIVoiceInput({
   visualizerBars = 48,
   demoMode = false,
   demoInterval = 3000,
-  className
+  className,
+  actualDuration = 0,
+  isRecording = false
 }: AIVoiceInputProps) {
   const [submitted, setSubmitted] = useState(false);
   const [time, setTime] = useState(0);
@@ -31,21 +34,29 @@ export function AIVoiceInput({
     setIsClient(true);
   }, []);
 
+  // Update submitted state based on isRecording prop
+  useEffect(() => {
+    setSubmitted(isRecording);
+  }, [isRecording]);
+
+  // Use actualDuration if provided, otherwise use internal time
+  const displayTime = actualDuration > 0 ? actualDuration : time;
+
   useEffect(() => {
     let intervalId: NodeJS.Timeout;
 
-    if (submitted) {
+    if (submitted && !actualDuration) {
       onStart?.();
       intervalId = setInterval(() => {
         setTime((t) => t + 1);
       }, 1000);
-    } else {
+    } else if (!submitted) {
       onStop?.(time);
       setTime(0);
     }
 
     return () => clearInterval(intervalId);
-  }, [submitted, time, onStart, onStop]);
+  }, [submitted, actualDuration, time, onStart, onStop]);
 
   useEffect(() => {
     if (!isDemo) return;
@@ -112,7 +123,7 @@ export function AIVoiceInput({
               : "text-black/30 dark:text-white/30"
           )}
         >
-          {formatTime(time)}
+          {formatTime(displayTime)}
         </span>
 
         <div className="h-4 w-64 flex items-center justify-center gap-0.5">
