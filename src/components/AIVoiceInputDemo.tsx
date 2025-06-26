@@ -303,6 +303,13 @@ export function AIVoiceInputDemo() {
           }
           isPlayingRef.current = false;
           playbackQueueRef.current = []; // Clear queue
+        } else if (message.type === 'end_call' && message.play === false) {
+          // Close WebSocket connection when end_call is received
+          appendLog('Received end_call command from server - closing connection', 'info', 'server');
+          if (webSocketRef.current) {
+            webSocketRef.current.close(1000, "Server requested end call");
+          }
+          handleStop(conversationDurationRef.current);
         } else if (message.event === 'media' && message.media?.payload) {
           const seq = message.media.seq;
           appendLog(`Received audio chunk, seq=${seq}`, 'info', 'server');
