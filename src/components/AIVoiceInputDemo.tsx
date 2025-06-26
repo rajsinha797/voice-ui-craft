@@ -21,7 +21,7 @@ interface Recording {
 interface LogEntry {
   timestamp: string;
   type: 'info' | 'error' | 'warning';
-  source: 'server' | 'browser'; // Add source to distinguish log origin
+  source: 'server' | 'browser';
   message: string;
 }
 
@@ -32,6 +32,7 @@ export function AIVoiceInputDemo() {
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
   const [playingRecording, setPlayingRecording] = useState<string | null>(null);
   
   // WebSocket and audio refs
@@ -59,6 +60,9 @@ export function AIVoiceInputDemo() {
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const destinationStreamRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const fullConversationRecorderRef = useRef<MediaRecorder | null>(null);
+  
+  // Playback control refs
+  const currentPlaybackSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   const WEBSOCKET_URL = 'ws://localhost:6543/voice/ws/browser/stream';
   const CHUNK_DURATION_MS = 1000;
@@ -66,19 +70,15 @@ export function AIVoiceInputDemo() {
   // Store logs for current recording
   const currentRecordingLogsRef = useRef<LogEntry[]>([]);
 
-  // Updated appendLog function with source parameter
   const appendLog = (message: string, type: 'info' | 'error' | 'warning' = 'info', source: 'server' | 'browser' = 'browser') => {
     const timestamp = new Date().toISOString().replace('T', ' ').replace('Z', '').slice(0, 23);
     
-    // Add appropriate prefix based on source
     const prefixedMessage = source === 'server' ? `[Server]: ${message}` : `[Browser]: ${message}`;
     
     const logEntry: LogEntry = { timestamp, type, source, message: prefixedMessage };
     
-    // Use async state update to prevent blocking
     setTimeout(() => {
       setLogs(prev => [...prev, logEntry]);
-      // Also store in current recording logs
       currentRecordingLogsRef.current.push(logEntry);
     }, 0);
     
@@ -117,20 +117,19 @@ export function AIVoiceInputDemo() {
       return;
     }
 
-    // Reset all state for new recording
     connectionAttemptInProgress.current = true;
     cleanupInProgress.current = false;
-    setLogs([]); // Clear logs for new recording
-    currentRecordingLogsRef.current = []; // Clear logs for current recording
+    setLogs([]);
+    currentRecordingLogsRef.current = [];
     setError(null);
     setIsConnecting(true);
+    setIsConnected(false);
     audioChunksRef.current = [];
     nextSeqToPlayRef.current = 0;
     audioBufferMapRef.current = {};
     playbackQueueRef.current = [];
     isPlayingRef.current = false;
     
-    // Start duration tracking
     startDurationTracking();
     
     appendLog('Starting new audio recording...', 'info', 'browser');
@@ -144,7 +143,7 @@ export function AIVoiceInputDemo() {
         duration: 0,
         timestamp: new Date(),
         status: 'processing',
-        logs: [] // Initialize empty logs
+        logs: []
       };
       
       currentRecordingRef.current = newRecording;
@@ -162,13 +161,13 @@ export function AIVoiceInputDemo() {
   const handleConnectionFailure = (errorMessage: string) => {
     setIsConnecting(false);
     setIsListening(false);
+    setIsConnected(false);
     connectionAttemptInProgress.current = false;
     
-    // Stop duration tracking and get final duration
     stopDurationTracking();
     
     if (currentRecordingRef.current) {
-      const recordingLogs = [...currentRecordingLogsRef.current]; // Copy current logs
+      const recordingLogs = [...currentRecordingLogsRef.current];
       setRecordings(prev => prev.map(r => 
         r.id === currentRecordingRef.current?.id 
           ? { ...r, status: 'error', error: errorMessage, duration: conversationDurationRef.current, logs: recordingLogs }
@@ -181,35 +180,31 @@ export function AIVoiceInputDemo() {
   };
 
   const handleStop = (duration: number) => {
-    // Prevent multiple stop calls
     if (cleanupInProgress.current) {
       return;
     }
     
     appendLog(`Stopping recording after ${conversationDurationRef.current} seconds`, 'info', 'browser');
     
-    // Stop duration tracking
     stopDurationTracking();
     
     setIsConnecting(false);
     setIsListening(false);
+    setIsConnected(false);
     connectionAttemptInProgress.current = false;
     
-    // Stop full conversation recorder first
     if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
       fullConversationRecorderRef.current.stop();
     }
     
-    // Stop MediaRecorder for WebSocket streaming
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
     }
     
-    // Update recording status when full conversation recording completes
     if (currentRecordingRef.current) {
       const recordingId = currentRecordingRef.current.id;
       const finalDuration = conversationDurationRef.current;
-      const recordingLogs = [...currentRecordingLogsRef.current]; // Copy current logs
+      const recordingLogs = [...currentRecordingLogsRef.current];
       
       setTimeout(() => {
         if (audioChunksRef.current.length > 0) {
@@ -259,7 +254,9 @@ export function AIVoiceInputDemo() {
         appendLog('WebSocket connected. Requesting microphone access...', 'info', 'browser');
         setIsConnecting(false);
         setIsListening(true);
+        setIsConnected(true);
         connectionAttemptInProgress.current = false;
+        appendLog('Connection established! Ready to speak - your voice will be sent to the server.', 'info', 'browser');
         initFullConversationRecording().then(resolve).catch(reject);
       };
 
@@ -268,6 +265,7 @@ export function AIVoiceInputDemo() {
         appendLog(`WebSocket closed: ${event.reason || 'No reason given'} (Code: ${event.code})`, 'warning', 'browser');
         setIsConnecting(false);
         setIsListening(false);
+        setIsConnected(false);
         connectionAttemptInProgress.current = false;
         webSocketRef.current = null;
       };
@@ -277,6 +275,7 @@ export function AIVoiceInputDemo() {
         appendLog('WebSocket connection failed', 'error', 'browser');
         setIsConnecting(false);
         setIsListening(false);
+        setIsConnected(false);
         connectionAttemptInProgress.current = false;
         webSocketRef.current = null;
         reject(new Error('WebSocket connection failed'));
@@ -295,6 +294,15 @@ export function AIVoiceInputDemo() {
 
         if (message.type === 'log') {
           appendLog(message.message, 'info', 'server');
+        } else if (message.type === 'playback' && message.play === false) {
+          // Stop current playback immediately when server requests
+          appendLog('Received playback stop command from server', 'info', 'server');
+          if (currentPlaybackSourceRef.current) {
+            currentPlaybackSourceRef.current.stop();
+            currentPlaybackSourceRef.current = null;
+          }
+          isPlayingRef.current = false;
+          playbackQueueRef.current = []; // Clear queue
         } else if (message.event === 'media' && message.media?.payload) {
           const seq = message.media.seq;
           appendLog(`Received audio chunk, seq=${seq}`, 'info', 'server');
@@ -337,6 +345,7 @@ export function AIVoiceInputDemo() {
   const playNextFromQueue = async () => {
     if (playbackQueueRef.current.length === 0) {
       isPlayingRef.current = false;
+      currentPlaybackSourceRef.current = null;
       return;
     }
 
@@ -345,26 +354,17 @@ export function AIVoiceInputDemo() {
 
     const source = audioContextRef.current.createBufferSource();
     source.buffer = buffer;
+    currentPlaybackSourceRef.current = source;
     
     source.connect(mixerNodeRef.current);
     source.connect(audioContextRef.current.destination);
 
     isPlayingRef.current = true;
-    appendLog('Starting TTS playback - recording continues', 'info', 'browser');
-
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.pause();
-      appendLog('Mic paused during TTS playback', 'info', 'browser');
-    }
+    appendLog('Starting TTS playback - microphone continues listening', 'info', 'browser');
 
     source.onended = () => {
       appendLog('TTS playback ended', 'info', 'browser');
-      
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
-        mediaRecorderRef.current.resume();
-        appendLog('Mic resumed after TTS', 'info', 'browser');
-      }
-      
+      currentPlaybackSourceRef.current = null;
       isPlayingRef.current = false;
       playNextFromQueue();
     };
@@ -466,8 +466,13 @@ export function AIVoiceInputDemo() {
     cleanupInProgress.current = true;
     appendLog('Cleaning up audio resources...', 'info', 'browser');
     
-    // Stop duration tracking
     stopDurationTracking();
+    
+    // Stop current playback
+    if (currentPlaybackSourceRef.current) {
+      currentPlaybackSourceRef.current.stop();
+      currentPlaybackSourceRef.current = null;
+    }
     
     if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
       fullConversationRecorderRef.current.stop();
@@ -512,6 +517,7 @@ export function AIVoiceInputDemo() {
     cleanupResources();
     setIsConnecting(false);
     setIsListening(false);
+    setIsConnected(false);
     connectionAttemptInProgress.current = false;
   };
 
@@ -672,9 +678,9 @@ export function AIVoiceInputDemo() {
             <CardTitle>Cold Call Audio Streaming Solution</CardTitle>
             <CardDescription>
               {isConnecting 
-                ? "Connecting..." 
-                : isListening 
-                  ? `Recording full conversation in ${selectedLanguage}...` 
+                ? "Connecting to server..." 
+                : isConnected && isListening 
+                  ? `✅ Connected! Ready to speak in ${selectedLanguage}. Recording full conversation...` 
                   : "Click the microphone button to start/stop recording full conversation"
               }
             </CardDescription>
