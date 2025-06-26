@@ -111,6 +111,51 @@ export function AIVoiceInputDemo() {
     }
   };
 
+  const resetAllStates = () => {
+    // Reset all UI states
+    setIsConnecting(false);
+    setIsListening(false);
+    setIsConnected(false);
+    setError(null);
+    
+    // Reset refs
+    connectionAttemptInProgress.current = false;
+    cleanupInProgress.current = false;
+    audioChunksRef.current = [];
+    nextSeqToPlayRef.current = 0;
+    audioBufferMapRef.current = {};
+    playbackQueueRef.current = [];
+    isPlayingRef.current = false;
+    
+    // Stop duration tracking
+    stopDurationTracking();
+    conversationStartTimeRef.current = null;
+    conversationDurationRef.current = 0;
+    
+    appendLog('All states reset - ready for new connection', 'info', 'browser');
+  };
+
+  const handleConnectionFailure = (errorMessage: string) => {
+    appendLog(`Connection failed: ${errorMessage}`, 'error', 'browser');
+    
+    // Update current recording to error state if exists
+    if (currentRecordingRef.current) {
+      const recordingLogs = [...currentRecordingLogsRef.current];
+      setRecordings(prev => prev.map(r => 
+        r.id === currentRecordingRef.current?.id 
+          ? { ...r, status: 'error', error: errorMessage, duration: conversationDurationRef.current, logs: recordingLogs }
+          : r
+      ));
+      currentRecordingRef.current = null;
+    }
+    
+    // Clean up all resources
+    cleanupResources();
+    
+    // Reset all states
+    resetAllStates();
+  };
+
   const handleStart = async () => {
     if (isConnecting || isListening || connectionAttemptInProgress.current) {
       console.log('[INFO] Connection attempt blocked - already connecting or listening');
@@ -152,31 +197,8 @@ export function AIVoiceInputDemo() {
       await initWebSocket();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'WebSocket connection failed';
-      appendLog(`Failed to start recording: ${errorMessage}`, 'error', 'browser');
-      setError(errorMessage);
       handleConnectionFailure(errorMessage);
     }
-  };
-
-  const handleConnectionFailure = (errorMessage: string) => {
-    setIsConnecting(false);
-    setIsListening(false);
-    setIsConnected(false);
-    connectionAttemptInProgress.current = false;
-    
-    stopDurationTracking();
-    
-    if (currentRecordingRef.current) {
-      const recordingLogs = [...currentRecordingLogsRef.current];
-      setRecordings(prev => prev.map(r => 
-        r.id === currentRecordingRef.current?.id 
-          ? { ...r, status: 'error', error: errorMessage, duration: conversationDurationRef.current, logs: recordingLogs }
-          : r
-      ));
-      currentRecordingRef.current = null;
-    }
-    
-    cleanupResources();
   };
 
   const handleStop = (duration: number) => {
@@ -187,11 +209,6 @@ export function AIVoiceInputDemo() {
     appendLog(`Stopping recording after ${conversationDurationRef.current} seconds`, 'info', 'browser');
     
     stopDurationTracking();
-    
-    setIsConnecting(false);
-    setIsListening(false);
-    setIsConnected(false);
-    connectionAttemptInProgress.current = false;
     
     if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
       fullConversationRecorderRef.current.stop();
@@ -231,7 +248,6 @@ export function AIVoiceInputDemo() {
 
   const handleWebSocketError = (error: string) => {
     appendLog(`WebSocket error: ${error}`, 'error', 'browser');
-    setError(error);
     
     // Safely close WebSocket connection
     if (webSocketRef.current) {
@@ -241,7 +257,7 @@ export function AIVoiceInputDemo() {
           webSocketRef.current.close(1000, "Error occurred");
         }
       } catch (e) {
-        appendLog('Error closing WebSocket connection', 'error', 'browser');
+        appendLog('Error closing WebSocket connection after error', 'error', 'browser');
       }
       webSocketRef.current = null;
     }
@@ -302,7 +318,7 @@ export function AIVoiceInputDemo() {
         setIsListening(true);
         setIsConnected(true);
         connectionAttemptInProgress.current = false;
-        appendLog('Connection established! Ready to speak - your voice will be sent to the server.', 'info', 'browser');
+        appendLog('✅ Connection established! Ready to speak - your voice will be sent to the server.', 'info', 'browser');
         initFullConversationRecording().then(resolve).catch((error) => {
           handleWebSocketError(`Failed to initialize audio recording: ${error.message}`);
           reject(error);
@@ -315,15 +331,14 @@ export function AIVoiceInputDemo() {
         const wasClean = event.wasClean ? 'clean' : 'unclean';
         appendLog(`WebSocket closed: ${reason} (Code: ${event.code}, ${wasClean})`, 'warning', 'browser');
         
-        setIsConnecting(false);
-        setIsListening(false);
-        setIsConnected(false);
-        connectionAttemptInProgress.current = false;
         webSocketRef.current = null;
         
-        // If connection was not clean or unexpected, treat as error
+        // If connection was not clean or unexpected, treat as error and reset all states
         if (!event.wasClean && event.code !== 1000) {
-          handleWebSocketError(`Connection lost unexpectedly: ${reason}`);
+          handleConnectionFailure(`Connection lost unexpectedly: ${reason}`);
+        } else {
+          // Even for clean closes, reset states to ensure UI is consistent
+          resetAllStates();
         }
       };
 
@@ -621,10 +636,7 @@ export function AIVoiceInputDemo() {
 
   const stopListening = () => {
     cleanupResources();
-    setIsConnecting(false);
-    setIsListening(false);
-    setIsConnected(false);
-    connectionAttemptInProgress.current = false;
+    resetAllStates();
   };
 
   const clearAllRecordings = () => {
