@@ -127,7 +127,7 @@ export function AIVoiceInputDemo() {
     playbackQueueRef.current = [];
     isPlayingRef.current = false;
     
-    // Stop duration tracking
+    // Stop duration tracking and reset duration
     stopDurationTracking();
     conversationStartTimeRef.current = null;
     conversationDurationRef.current = 0;
@@ -650,6 +650,21 @@ export function AIVoiceInputDemo() {
     setError(null);
   };
 
+  const deleteRecording = (recordingId: string) => {
+    // Stop playing if this recording is currently playing
+    if (playingRecording === recordingId) {
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause();
+        currentAudioRef.current = null;
+      }
+      setPlayingRecording(null);
+    }
+    
+    // Remove the recording from the list
+    setRecordings(prev => prev.filter(r => r.id !== recordingId));
+    appendLog(`Recording ${recordingId.slice(0, 8)} deleted`, 'info', 'browser');
+  };
+
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -947,6 +962,14 @@ export function AIVoiceInputDemo() {
                           className="flex items-center gap-1"
                         >
                           <Download className="w-3 h-3" />
+                        </Button>
+                        <Button 
+                          variant="outline" 
+                          size="sm" 
+                          onClick={() => deleteRecording(recording.id)}
+                          className="flex items-center gap-1 text-red-600 hover:text-red-700 hover:bg-red-50"
+                        >
+                          <Trash2 className="w-3 h-3" />
                         </Button>
                       </div>
                     </div>
