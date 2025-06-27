@@ -745,33 +745,86 @@ export function AIVoiceInputDemo() {
   };
 
   const playRecording = (recording: Recording) => {
-    if (!recording.audioBlob) return;
-
-    if (currentAudioRef.current) {
-      currentAudioRef.current.pause();
-    }
-
-    if (playingRecording === recording.id) {
-      setPlayingRecording(null);
-      currentAudioRef.current = null;
+    appendLog(`Attempting to play recording ${recording.id.slice(0, 8)}`, 'info', 'browser');
+    
+    if (!recording.audioBlob) {
+      appendLog(`No audio blob found for recording ${recording.id.slice(0, 8)}`, 'error', 'browser');
       return;
     }
 
-    const audio = new Audio(URL.createObjectURL(recording.audioBlob));
-    currentAudioRef.current = audio;
-    setPlayingRecording(recording.id);
+    // Stop current audio if playing
+    if (currentAudioRef.current) {
+      appendLog('Stopping current audio playback', 'info', 'browser');
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
 
-    audio.onended = () => {
+    // If clicking on the same recording that's playing, just stop
+    if (playingRecording === recording.id) {
+      appendLog(`Stopping playback of recording ${recording.id.slice(0, 8)}`, 'info', 'browser');
+      setPlayingRecording(null);
+      return;
+    }
+
+    try {
+      appendLog(`Creating audio element for recording ${recording.id.slice(0, 8)}, blob size: ${recording.audioBlob.size} bytes`, 'info', 'browser');
+      const audioUrl = URL.createObjectURL(recording.audioBlob);
+      const audio = new Audio(audioUrl);
+      
+      // Set up event listeners before playing
+      audio.onloadstart = () => {
+        appendLog('Audio loading started', 'info', 'browser');
+      };
+      
+      audio.oncanplay = () => {
+        appendLog('Audio can start playing', 'info', 'browser');
+      };
+      
+      audio.onplay = () => {
+        appendLog('Audio playback started', 'info', 'browser');
+      };
+
+      audio.onended = () => {
+        appendLog('Audio playback ended', 'info', 'browser');
+        setPlayingRecording(null);
+        currentAudioRef.current = null;
+        URL.revokeObjectURL(audioUrl);
+      };
+
+      audio.onerror = (e) => {
+        appendLog(`Audio playback error: ${audio.error?.message || 'Unknown error'}`, 'error', 'browser');
+        setPlayingRecording(null);
+        currentAudioRef.current = null;
+        URL.revokeObjectURL(audioUrl);
+      };
+
+      audio.onpause = () => {
+        appendLog('Audio playback paused', 'info', 'browser');
+      };
+
+      currentAudioRef.current = audio;
+      setPlayingRecording(recording.id);
+
+      // Start playing
+      const playPromise = audio.play();
+      
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            appendLog('Audio play() promise resolved successfully', 'info', 'browser');
+          })
+          .catch((error) => {
+            appendLog(`Audio play() promise rejected: ${error.message}`, 'error', 'browser');
+            setPlayingRecording(null);
+            currentAudioRef.current = null;
+            URL.revokeObjectURL(audioUrl);
+          });
+      }
+    } catch (error) {
+      appendLog(`Error setting up audio playback: ${error}`, 'error', 'browser');
       setPlayingRecording(null);
       currentAudioRef.current = null;
-    };
-
-    audio.onerror = () => {
-      setPlayingRecording(null);
-      currentAudioRef.current = null;
-    };
-
-    audio.play();
+    }
   };
 
   const getStatusIcon = (status: Recording['status']) => {
