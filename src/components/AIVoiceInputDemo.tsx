@@ -229,73 +229,27 @@ export function AIVoiceInputDemo() {
     stopListening();
   };
 
-  const handleWebSocketError = (error: string) => {
-    appendLog(`WebSocket error: ${error}`, 'error', 'browser');
-    setError(error);
-    
-    // Safely close WebSocket connection
-    if (webSocketRef.current) {
-      try {
-        if (webSocketRef.current.readyState === WebSocket.OPEN || 
-            webSocketRef.current.readyState === WebSocket.CONNECTING) {
-          webSocketRef.current.close(1000, "Error occurred");
-        }
-      } catch (e) {
-        appendLog('Error closing WebSocket connection', 'error', 'browser');
-      }
-      webSocketRef.current = null;
-    }
-    
-    handleConnectionFailure(error);
-  };
-
-  const safelyCloseWebSocket = (reason: string = "Connection closed") => {
-    if (webSocketRef.current) {
-      try {
-        const currentState = webSocketRef.current.readyState;
-        appendLog(`Closing WebSocket connection. Current state: ${currentState}`, 'info', 'browser');
-        
-        if (currentState === WebSocket.OPEN || currentState === WebSocket.CONNECTING) {
-          webSocketRef.current.close(1000, reason);
-        }
-      } catch (error) {
-        appendLog(`Error during WebSocket close: ${error}`, 'error', 'browser');
-      } finally {
-        webSocketRef.current = null;
-      }
-    }
-  };
-
   const initWebSocket = async () => {
     return new Promise<void>((resolve, reject) => {
       if (webSocketRef.current) {
-        safelyCloseWebSocket("Reinitializing connection");
+        webSocketRef.current.close();
+        webSocketRef.current = null;
       }
 
       appendLog('Connecting to WebSocket...', 'info', 'browser');
       
       const wsUrlWithStreamId = `${WEBSOCKET_URL}?streamSid=${streamIdRef.current}&language=${selectedLanguage}`;
-      
-      try {
-        const webSocket = new WebSocket(wsUrlWithStreamId);
-        webSocketRef.current = webSocket;
-      } catch (error) {
-        const errorMessage = `Failed to create WebSocket: ${error}`;
-        handleWebSocketError(errorMessage);
-        reject(new Error(errorMessage));
-        return;
-      }
+      const webSocket = new WebSocket(wsUrlWithStreamId);
+      webSocketRef.current = webSocket;
 
       const connectionTimeout = setTimeout(() => {
-        if (webSocketRef.current && webSocketRef.current.readyState === WebSocket.CONNECTING) {
-          appendLog('WebSocket connection timeout', 'error', 'browser');
-          safelyCloseWebSocket("Connection timeout");
-          handleWebSocketError('WebSocket connection timeout');
+        if (webSocket.readyState === WebSocket.CONNECTING) {
+          webSocket.close();
           reject(new Error('WebSocket connection timeout'));
         }
       }, 10000);
 
-      webSocketRef.current.onopen = () => {
+      webSocket.onopen = () => {
         clearTimeout(connectionTimeout);
         appendLog('WebSocket connected. Requesting microphone access...', 'info', 'browser');
         setIsConnecting(false);
@@ -303,88 +257,78 @@ export function AIVoiceInputDemo() {
         setIsConnected(true);
         connectionAttemptInProgress.current = false;
         appendLog('Connection established! Ready to speak - your voice will be sent to the server.', 'info', 'browser');
-        initFullConversationRecording().then(resolve).catch((error) => {
-          handleWebSocketError(`Failed to initialize audio recording: ${error.message}`);
-          reject(error);
-        });
+        initFullConversationRecording().then(resolve).catch(reject);
       };
 
-      webSocketRef.current.onclose = (event) => {
+      webSocket.onclose = (event) => {
         clearTimeout(connectionTimeout);
-        const reason = event.reason || 'No reason given';
-        const wasClean = event.wasClean ? 'clean' : 'unclean';
-        appendLog(`WebSocket closed: ${reason} (Code: ${event.code}, ${wasClean})`, 'warning', 'browser');
-        
+        appendLog(`WebSocket closed: ${event.reason || 'No reason given'} (Code: ${event.code})`, 'warning', 'browser');
         setIsConnecting(false);
         setIsListening(false);
         setIsConnected(false);
         connectionAttemptInProgress.current = false;
         webSocketRef.current = null;
-        
-        // If connection was not clean or unexpected, treat as error
-        if (!event.wasClean && event.code !== 1000) {
-          handleWebSocketError(`Connection lost unexpectedly: ${reason}`);
-        }
       };
 
-      webSocketRef.current.onerror = (error) => {
+      webSocket.onerror = (error) => {
         clearTimeout(connectionTimeout);
-        appendLog('WebSocket connection error occurred', 'error', 'browser');
-        handleWebSocketError('WebSocket connection failed due to network error');
+        appendLog('WebSocket connection failed', 'error', 'browser');
+        setIsConnecting(false);
+        setIsListening(false);
+        setIsConnected(false);
+        connectionAttemptInProgress.current = false;
+        webSocketRef.current = null;
         reject(new Error('WebSocket connection failed'));
       };
 
-      webSocketRef.current.onmessage = async (event) => {
+      webSocket.onmessage = async (event) => {
+        let message;
         try {
-          let message;
-          try {
-            message = JSON.parse(event.data);
-          } catch (e) {
-            appendLog(event.data, 'info', 'server');
-            return;
-          }
+          message = JSON.parse(event.data);
+        } catch (e) {
+          appendLog(event.data, 'info', 'server');
+          return;
+        }
 
-          console.log("[LOG] Message received from server:", message);
+        console.log("[LOG] Message received from server:", message);
 
-          if (message.type === 'log') {
-            appendLog(message.message, 'info', 'server');
-          } else if (message.type === 'playback' && message.play === false) {
-            // Stop current playback immediately when server requests
-            appendLog('Received playback stop command from server', 'info', 'server');
-            if (currentPlaybackSourceRef.current) {
-              currentPlaybackSourceRef.current.stop();
-              currentPlaybackSourceRef.current = null;
-            }
-            isPlayingRef.current = false;
-            playbackQueueRef.current = []; // Clear queue
-          } else if (message.type === 'end_call' && message.play === false) {
-            // Close WebSocket connection when end_call is received
-            appendLog('Received end_call command from server - closing connection', 'info', 'server');
-            safelyCloseWebSocket("Server requested end call");
-            handleStop(conversationDurationRef.current);
-          } else if (message.event === 'media' && message.media?.payload) {
-            const seq = message.media.seq;
-            appendLog(`Received audio chunk, seq=${seq}`, 'info', 'server');
-            
-            const base64 = message.media.payload;
-            const audioBytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-            
-            if (audioContextRef.current) {
-              try {
-                const audioBuffer = await audioContextRef.current.decodeAudioData(audioBytes.buffer);
-                audioBufferMapRef.current[seq] = audioBuffer;
-                tryPlayInOrder();
-              } catch (error) {
-                console.error('Error decoding audio:', error);
-                appendLog('Error decoding audio from server', 'error', 'browser');
-              }
-            }
-          } else {
-            appendLog(`[Unhandled]: ${JSON.stringify(message)}`, 'warning', 'server');
+        if (message.type === 'log') {
+          appendLog(message.message, 'info', 'server');
+        } else if (message.type === 'playback' && message.play === false) {
+          // Stop current playback immediately when server requests
+          appendLog('Received playback stop command from server', 'info', 'server');
+          if (currentPlaybackSourceRef.current) {
+            currentPlaybackSourceRef.current.stop();
+            currentPlaybackSourceRef.current = null;
           }
-        } catch (error) {
-          appendLog(`Error processing WebSocket message: ${error}`, 'error', 'browser');
-          // Don't close connection for message processing errors, just log them
+          isPlayingRef.current = false;
+          playbackQueueRef.current = []; // Clear queue
+        } else if (message.type === 'end_call' && message.play === false) {
+          // Close WebSocket connection when end_call is received
+          appendLog('Received end_call command from server - closing connection', 'info', 'server');
+          if (webSocketRef.current) {
+            webSocketRef.current.close(1000, "Server requested end call");
+          }
+          handleStop(conversationDurationRef.current);
+        } else if (message.event === 'media' && message.media?.payload) {
+          const seq = message.media.seq;
+          appendLog(`Received audio chunk, seq=${seq}`, 'info', 'server');
+          
+          const base64 = message.media.payload;
+          const audioBytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+          
+          if (audioContextRef.current) {
+            try {
+              const audioBuffer = await audioContextRef.current.decodeAudioData(audioBytes.buffer);
+              audioBufferMapRef.current[seq] = audioBuffer;
+              tryPlayInOrder();
+            } catch (error) {
+              console.error('Error decoding audio:', error);
+              appendLog('Error decoding audio from server', 'error', 'browser');
+            }
+          }
+        } else {
+          appendLog(`[Unhandled]: ${JSON.stringify(message)}`, 'warning', 'server');
         }
       };
     });
@@ -468,9 +412,7 @@ export function AIVoiceInputDemo() {
       };
 
       fullConversationRecorderRef.current.onerror = (event) => {
-        const errorMessage = `Full conversation recorder error: ${(event as any).error.name}`;
-        appendLog(errorMessage, 'error', 'browser');
-        handleWebSocketError(errorMessage);
+        appendLog(`Full conversation recorder error: ${(event as any).error.name}`, 'error', 'browser');
       };
 
       fullConversationRecorderRef.current.start(CHUNK_DURATION_MS);
@@ -481,35 +423,21 @@ export function AIVoiceInputDemo() {
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           if (webSocketRef.current && webSocketRef.current.readyState === WebSocket.OPEN) {
-            try {
-              const reader = new FileReader();
-              reader.onloadend = () => {
-                const base64Audio = (reader.result as string).split(',')[1];
-                const message = {
-                  start: {
-                    streamSid: streamIdRef.current
-                  },
-                  media: {
-                    payload: base64Audio
-                  }
-                };
-                
-                if (webSocketRef.current && webSocketRef.current.readyState === WebSocket.OPEN) {
-                  webSocketRef.current.send(JSON.stringify(message));
-                  appendLog('Audio chunk sent to server using websocket', 'info', 'browser');
-                } else {
-                  appendLog('WebSocket not ready, skipping audio chunk', 'warning', 'browser');
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const base64Audio = (reader.result as string).split(',')[1];
+              const message = {
+                start: {
+                  streamSid: streamIdRef.current
+                },
+                media: {
+                  payload: base64Audio
                 }
               };
-              reader.onerror = () => {
-                appendLog('Error reading audio data for WebSocket transmission', 'error', 'browser');
-              };
-              reader.readAsDataURL(event.data);
-            } catch (error) {
-              appendLog(`Error processing audio data: ${error}`, 'error', 'browser');
-            }
-          } else {
-            appendLog('WebSocket connection lost, cannot send audio chunk', 'warning', 'browser');
+              webSocketRef.current?.send(JSON.stringify(message));
+              appendLog('Audio chunk sent to server using websocket', 'info', 'browser');
+            };
+            reader.readAsDataURL(event.data);
           }
         }
       };
@@ -524,9 +452,8 @@ export function AIVoiceInputDemo() {
       };
 
       mediaRecorder.onerror = (event) => {
-        const errorMessage = `WebSocket streaming error: ${(event as any).error.name}`;
-        appendLog(errorMessage, 'error', 'browser');
-        handleWebSocketError(errorMessage);
+        appendLog(`WebSocket streaming error: ${(event as any).error.name}`, 'error', 'browser');
+        handleConnectionFailure(`MediaRecorder error: ${(event as any).error.name}`);
       };
 
       mediaRecorder.start(CHUNK_DURATION_MS);
@@ -550,71 +477,45 @@ export function AIVoiceInputDemo() {
     
     // Stop current playback
     if (currentPlaybackSourceRef.current) {
-      try {
-        currentPlaybackSourceRef.current.stop();
-      } catch (error) {
-        appendLog(`Error stopping audio playback: ${error}`, 'warning', 'browser');
-      }
+      currentPlaybackSourceRef.current.stop();
       currentPlaybackSourceRef.current = null;
     }
     
     if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
-      try {
-        fullConversationRecorderRef.current.stop();
-      } catch (error) {
-        appendLog(`Error stopping full conversation recorder: ${error}`, 'warning', 'browser');
-      }
+      fullConversationRecorderRef.current.stop();
     }
     
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      try {
-        mediaRecorderRef.current.stop();
-      } catch (error) {
-        appendLog(`Error stopping media recorder: ${error}`, 'warning', 'browser');
-      }
+      mediaRecorderRef.current.stop();
     }
 
     if (micSourceRef.current) {
-      try {
-        micSourceRef.current.disconnect();
-      } catch (error) {
-        appendLog(`Error disconnecting mic source: ${error}`, 'warning', 'browser');
-      }
+      micSourceRef.current.disconnect();
       micSourceRef.current = null;
     }
     
     if (mixerNodeRef.current) {
-      try {
-        mixerNodeRef.current.disconnect();
-      } catch (error) {
-        appendLog(`Error disconnecting mixer node: ${error}`, 'warning', 'browser');
-      }
+      mixerNodeRef.current.disconnect();
       mixerNodeRef.current = null;
     }
     
     if (destinationStreamRef.current) {
-      try {
-        destinationStreamRef.current.disconnect();
-      } catch (error) {
-        appendLog(`Error disconnecting destination stream: ${error}`, 'warning', 'browser');
-      }
+      destinationStreamRef.current.disconnect();
       destinationStreamRef.current = null;
     }
 
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      try {
-        audioContextRef.current.close();
-      } catch (error) {
-        appendLog(`Error closing audio context: ${error}`, 'warning', 'browser');
-      }
+      audioContextRef.current.close();
     }
 
-    // Safely close WebSocket connection
-    safelyCloseWebSocket("Client initiated cleanup");
+    if (webSocketRef.current && (webSocketRef.current.readyState === WebSocket.OPEN || webSocketRef.current.readyState === WebSocket.CONNECTING)) {
+      webSocketRef.current.close(1000, "Client initiated stop");
+    }
 
     fullConversationRecorderRef.current = null;
     mediaRecorderRef.current = null;
     audioContextRef.current = null;
+    webSocketRef.current = null;
     playbackQueueRef.current = [];
     isPlayingRef.current = false;
   };
