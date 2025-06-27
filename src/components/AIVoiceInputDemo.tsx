@@ -42,6 +42,7 @@ export function AIVoiceInputDemo() {
   const streamIdRef = useRef<string>('');
   const currentRecordingRef = useRef<Recording | null>(null);
   const connectionAttemptInProgress = useRef<boolean>(false);
+  const audioChunksRef = useRef<Blob[]>([]);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   
   // Duration tracking refs
@@ -50,7 +51,7 @@ export function AIVoiceInputDemo() {
   const cleanupInProgress = useRef<boolean>(false);
   const durationUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
-  // Full conversation recording refs - FIXED SETUP
+  // Full conversation recording refs
   const playbackQueueRef = useRef<AudioBuffer[]>([]);
   const isPlayingRef = useRef<boolean>(false);
   const nextSeqToPlayRef = useRef<number>(0);
@@ -59,14 +60,12 @@ export function AIVoiceInputDemo() {
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const destinationStreamRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const fullConversationRecorderRef = useRef<MediaRecorder | null>(null);
-  const fullConversationChunksRef = useRef<Blob[]>([]);
-  const micStreamRef = useRef<MediaStream | null>(null);
   
   // Playback control refs
   const currentPlaybackSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   const WEBSOCKET_URL = 'ws://localhost:6543/voice/ws/browser/stream';
-  const CHUNK_DURATION_MS = 500; // Reduced for better recording
+  const CHUNK_DURATION_MS = 1000;
 
   // Store logs for current recording
   const currentRecordingLogsRef = useRef<LogEntry[]>([]);
@@ -122,13 +121,13 @@ export function AIVoiceInputDemo() {
     // Reset refs
     connectionAttemptInProgress.current = false;
     cleanupInProgress.current = false;
-    fullConversationChunksRef.current = [];
+    audioChunksRef.current = [];
     nextSeqToPlayRef.current = 0;
     audioBufferMapRef.current = {};
     playbackQueueRef.current = [];
     isPlayingRef.current = false;
     
-    // Stop duration tracking and reset duration
+    // Stop duration tracking
     stopDurationTracking();
     conversationStartTimeRef.current = null;
     conversationDurationRef.current = 0;
@@ -142,18 +141,9 @@ export function AIVoiceInputDemo() {
     // Update current recording to error state if exists
     if (currentRecordingRef.current) {
       const recordingLogs = [...currentRecordingLogsRef.current];
-      const finalDuration = conversationDurationRef.current;
-      
-      // Create final audio blob from collected chunks
-      let finalAudioBlob: Blob | undefined;
-      if (fullConversationChunksRef.current.length > 0) {
-        finalAudioBlob = new Blob(fullConversationChunksRef.current, { type: 'audio/webm' });
-        appendLog(`Created final audio blob from ${fullConversationChunksRef.current.length} chunks, size: ${finalAudioBlob.size} bytes`, 'info', 'browser');
-      }
-      
       setRecordings(prev => prev.map(r => 
         r.id === currentRecordingRef.current?.id 
-          ? { ...r, status: 'error', error: 'Connection failed', duration: finalDuration, audioBlob: finalAudioBlob, logs: recordingLogs }
+          ? { ...r, status: 'error', error: errorMessage, duration: conversationDurationRef.current, logs: recordingLogs }
           : r
       ));
       currentRecordingRef.current = null;
@@ -179,7 +169,7 @@ export function AIVoiceInputDemo() {
     setError(null);
     setIsConnecting(true);
     setIsConnected(false);
-    fullConversationChunksRef.current = [];
+    audioChunksRef.current = [];
     nextSeqToPlayRef.current = 0;
     audioBufferMapRef.current = {};
     playbackQueueRef.current = [];
@@ -220,15 +210,11 @@ export function AIVoiceInputDemo() {
     
     stopDurationTracking();
     
-    // Stop full conversation recorder first
-    if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state === "recording") {
-      appendLog('Stopping full conversation recorder', 'info', 'browser');
+    if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
       fullConversationRecorderRef.current.stop();
     }
     
-    // Stop WebSocket streaming recorder
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      appendLog('Stopping WebSocket streaming recorder', 'info', 'browser');
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
     }
     
@@ -237,22 +223,23 @@ export function AIVoiceInputDemo() {
       const finalDuration = conversationDurationRef.current;
       const recordingLogs = [...currentRecordingLogsRef.current];
       
-      // Wait for final chunks to arrive
       setTimeout(() => {
-        let finalAudioBlob: Blob | undefined;
-        if (fullConversationChunksRef.current.length > 0) {
-          finalAudioBlob = new Blob(fullConversationChunksRef.current, { type: 'audio/webm' });
-          appendLog(`✅ Full conversation recorded successfully! Created audio blob with ${fullConversationChunksRef.current.length} chunks, total size: ${finalAudioBlob.size} bytes`, 'info', 'browser');
+        if (audioChunksRef.current.length > 0) {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          
+          setRecordings(prev => prev.map(r => 
+            r.id === recordingId 
+              ? { ...r, duration: finalDuration, status: 'success', audioBlob, logs: recordingLogs }
+              : r
+          ));
         } else {
-          appendLog('❌ No audio chunks were collected during recording', 'error', 'browser');
+          setRecordings(prev => prev.map(r => 
+            r.id === recordingId 
+              ? { ...r, duration: finalDuration, status: 'success', logs: recordingLogs }
+              : r
+          ));
         }
-        
-        setRecordings(prev => prev.map(r => 
-          r.id === recordingId 
-            ? { ...r, duration: finalDuration, status: finalAudioBlob ? 'success' : 'error', audioBlob: finalAudioBlob, logs: recordingLogs, error: finalAudioBlob ? undefined : 'No audio recorded' }
-            : r
-        ));
-      }, 500); // Increased wait time for chunks
+      }, 100);
     }
     
     currentRecordingRef.current = null;
@@ -346,27 +333,19 @@ export function AIVoiceInputDemo() {
         
         webSocketRef.current = null;
         
-        // Always reset all states on WebSocket close to ensure UI consistency
-        if (cleanupInProgress.current) {
-          return; // Avoid double cleanup
-        }
-        
-        // Clean up all resources
-        cleanupResources();
-        
-        // Reset all states
-        resetAllStates();
-        
-        // If connection was not clean or unexpected, treat as error
+        // If connection was not clean or unexpected, treat as error and reset all states
         if (!event.wasClean && event.code !== 1000) {
           handleConnectionFailure(`Connection lost unexpectedly: ${reason}`);
+        } else {
+          // Even for clean closes, reset states to ensure UI is consistent
+          resetAllStates();
         }
       };
 
       webSocketRef.current.onerror = (error) => {
         clearTimeout(connectionTimeout);
         appendLog('WebSocket connection error occurred', 'error', 'browser');
-        handleWebSocketError('Connection failed');
+        handleWebSocketError('WebSocket connection failed due to network error');
         reject(new Error('WebSocket connection failed'));
       };
 
@@ -455,15 +434,14 @@ export function AIVoiceInputDemo() {
     source.buffer = buffer;
     currentPlaybackSourceRef.current = source;
     
-    // Connect TTS audio to both the mixer (for recording) and speakers (for playback)
-    source.connect(mixerNodeRef.current); // For recording
-    source.connect(audioContextRef.current.destination); // For playback
+    source.connect(mixerNodeRef.current);
+    source.connect(audioContextRef.current.destination);
 
     isPlayingRef.current = true;
-    appendLog('🔊 TTS playback started - audio will be included in full recording', 'info', 'browser');
+    appendLog('Starting TTS playback - microphone continues listening', 'info', 'browser');
 
     source.onended = () => {
-      appendLog('🔊 TTS playback ended', 'info', 'browser');
+      appendLog('TTS playback ended', 'info', 'browser');
       currentPlaybackSourceRef.current = null;
       isPlayingRef.current = false;
       playNextFromQueue();
@@ -474,79 +452,48 @@ export function AIVoiceInputDemo() {
 
   const initFullConversationRecording = async () => {
     try {
-      // Get microphone stream
-      const micStream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          sampleRate: 24000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
-      
-      micStreamRef.current = micStream;
-      appendLog('✅ Microphone access granted, setting up full conversation recording...', 'info', 'browser');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      appendLog('Microphone access granted. Setting up full conversation recording...', 'info', 'browser');
 
-      // Create audio context
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({
-        sampleRate: 24000
-      });
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       
-      await audioContextRef.current.resume();
-      appendLog('✅ Audio context created and resumed', 'info', 'browser');
-      
-      // Create mixer node for combining mic and TTS audio
       mixerNodeRef.current = audioContextRef.current.createGain();
-      mixerNodeRef.current.gain.value = 1.0;
       
-      // Create destination stream for full conversation recording
       destinationStreamRef.current = audioContextRef.current.createMediaStreamDestination();
       mixerNodeRef.current.connect(destinationStreamRef.current);
       
-      // Connect microphone to mixer
-      micSourceRef.current = audioContextRef.current.createMediaStreamSource(micStream);
+      micSourceRef.current = audioContextRef.current.createMediaStreamSource(stream);
       micSourceRef.current.connect(mixerNodeRef.current);
       
-      appendLog('✅ Audio routing setup complete (mic → mixer → destination)', 'info', 'browser');
+      fullConversationRecorderRef.current = new MediaRecorder(destinationStreamRef.current.stream);
       
-      // Initialize full conversation recorder with the mixed stream
-      fullConversationRecorderRef.current = new MediaRecorder(destinationStreamRef.current.stream, {
-        mimeType: 'audio/webm'
-      });
-      
-      // Set up full conversation recorder event handlers
       fullConversationRecorderRef.current.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          fullConversationChunksRef.current.push(event.data);
-          appendLog(`📹 Full conversation chunk recorded: ${event.data.size} bytes (total chunks: ${fullConversationChunksRef.current.length})`, 'info', 'browser');
+          audioChunksRef.current.push(event.data);
+          appendLog(`Full conversation chunk recorded: ${event.data.size} bytes`, 'info', 'browser');
         }
       };
 
       fullConversationRecorderRef.current.onstart = () => {
-        appendLog('🎬 Full conversation recording STARTED', 'info', 'browser');
+        appendLog('Full conversation recording started', 'info', 'browser');
       };
 
       fullConversationRecorderRef.current.onstop = () => {
-        appendLog(`🎬 Full conversation recording STOPPED - collected ${fullConversationChunksRef.current.length} total chunks`, 'info', 'browser');
+        appendLog('Full conversation recording stopped', 'info', 'browser');
       };
 
       fullConversationRecorderRef.current.onerror = (event) => {
-        const errorMessage = `Full conversation recorder error: ${(event as any).error?.name || 'Unknown error'}`;
+        const errorMessage = `Full conversation recorder error: ${(event as any).error.name}`;
         appendLog(errorMessage, 'error', 'browser');
+        handleWebSocketError(errorMessage);
       };
 
-      // Start the full conversation recording
       fullConversationRecorderRef.current.start(CHUNK_DURATION_MS);
-      appendLog('🎬 Full conversation recorder started with chunk duration:', 'info', 'browser');
       
-      // Set up WebSocket streaming recorder (separate from full conversation)
-      const wsRecorder = new MediaRecorder(micStream, {
-        mimeType: 'audio/webm'
-      });
-      mediaRecorderRef.current = wsRecorder;
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
 
-      wsRecorder.ondataavailable = (event) => {
+      mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           if (webSocketRef.current && webSocketRef.current.readyState === WebSocket.OPEN) {
             try {
@@ -564,30 +511,44 @@ export function AIVoiceInputDemo() {
                 
                 if (webSocketRef.current && webSocketRef.current.readyState === WebSocket.OPEN) {
                   webSocketRef.current.send(JSON.stringify(message));
-                  appendLog('🎤 Audio chunk sent to WebSocket server', 'info', 'browser');
+                  appendLog('Audio chunk sent to server using websocket', 'info', 'browser');
+                } else {
+                  appendLog('WebSocket not ready, skipping audio chunk', 'warning', 'browser');
                 }
+              };
+              reader.onerror = () => {
+                appendLog('Error reading audio data for WebSocket transmission', 'error', 'browser');
               };
               reader.readAsDataURL(event.data);
             } catch (error) {
-              appendLog(`Error processing WebSocket audio: ${error}`, 'error', 'browser');
+              appendLog(`Error processing audio data: ${error}`, 'error', 'browser');
             }
+          } else {
+            appendLog('WebSocket connection lost, cannot send audio chunk', 'warning', 'browser');
           }
         }
       };
 
-      wsRecorder.onstart = () => {
-        appendLog('🎤 WebSocket audio streaming started', 'info', 'browser');
+      mediaRecorder.onstart = () => {
+        appendLog('WebSocket streaming started', 'info', 'browser');
       };
 
-      wsRecorder.onstop = () => {
-        appendLog('🎤 WebSocket audio streaming stopped', 'info', 'browser');
+      mediaRecorder.onstop = () => {
+        appendLog('WebSocket streaming stopped', 'info', 'browser');
+        stream.getTracks().forEach(track => track.stop());
       };
 
-      wsRecorder.start(CHUNK_DURATION_MS);
+      mediaRecorder.onerror = (event) => {
+        const errorMessage = `WebSocket streaming error: ${(event as any).error.name}`;
+        appendLog(errorMessage, 'error', 'browser');
+        handleWebSocketError(errorMessage);
+      };
+
+      mediaRecorder.start(CHUNK_DURATION_MS);
       
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to initialize audio recording';
-      appendLog(`❌ Error initializing audio recording: ${errorMessage}`, 'error', 'browser');
+      const errorMessage = err instanceof Error ? err.message : 'Microphone access denied';
+      appendLog(`Error accessing microphone: ${errorMessage}`, 'error', 'browser');
       throw err;
     }
   };
@@ -663,18 +624,6 @@ export function AIVoiceInputDemo() {
       }
     }
 
-    // Stop mic stream tracks
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach(track => {
-        try {
-          track.stop();
-        } catch (error) {
-          appendLog(`Error stopping mic stream track: ${error}`, 'warning', 'browser');
-        }
-      });
-      micStreamRef.current = null;
-    }
-
     // Safely close WebSocket connection
     safelyCloseWebSocket("Client initiated cleanup");
 
@@ -699,21 +648,6 @@ export function AIVoiceInputDemo() {
     setRecordings([]);
     setLogs([]);
     setError(null);
-  };
-
-  const deleteRecording = (recordingId: string) => {
-    // Stop playing if this recording is currently playing
-    if (playingRecording === recordingId) {
-      if (currentAudioRef.current) {
-        currentAudioRef.current.pause();
-        currentAudioRef.current = null;
-      }
-      setPlayingRecording(null);
-    }
-    
-    // Remove the recording from the list
-    setRecordings(prev => prev.filter(r => r.id !== recordingId));
-    appendLog(`Recording ${recordingId.slice(0, 8)} deleted`, 'info', 'browser');
   };
 
   const formatDuration = (seconds: number) => {
@@ -788,79 +722,33 @@ export function AIVoiceInputDemo() {
   };
 
   const playRecording = (recording: Recording) => {
-    appendLog(`🎵 Attempting to play recording ${recording.id.slice(0, 8)}`, 'info', 'browser');
-    
-    if (!recording.audioBlob) {
-      appendLog(`❌ No audio blob found for recording ${recording.id.slice(0, 8)}`, 'error', 'browser');
-      return;
-    }
+    if (!recording.audioBlob) return;
 
-    // Stop current audio if playing
     if (currentAudioRef.current) {
-      appendLog('⏹️ Stopping current audio playback', 'info', 'browser');
       currentAudioRef.current.pause();
-      currentAudioRef.current = null;
     }
 
-    // If clicking on the same recording that's playing, just stop
     if (playingRecording === recording.id) {
-      appendLog(`⏹️ Stopping playback of recording ${recording.id.slice(0, 8)}`, 'info', 'browser');
       setPlayingRecording(null);
+      currentAudioRef.current = null;
       return;
     }
 
-    try {
-      appendLog(`🎵 Creating audio element for recording ${recording.id.slice(0, 8)}, blob size: ${recording.audioBlob.size} bytes`, 'info', 'browser');
-      const audioUrl = URL.createObjectURL(recording.audioBlob);
-      const audio = new Audio(audioUrl);
-      
-      // Set up event listeners
-      audio.oncanplaythrough = () => {
-        appendLog(`✅ Audio ready to play - duration: ${audio.duration} seconds`, 'info', 'browser');
-      };
-      
-      audio.onplay = () => {
-        appendLog('▶️ Audio playback started successfully', 'info', 'browser');
-      };
+    const audio = new Audio(URL.createObjectURL(recording.audioBlob));
+    currentAudioRef.current = audio;
+    setPlayingRecording(recording.id);
 
-      audio.onended = () => {
-        appendLog('✅ Audio playback completed', 'info', 'browser');
-        setPlayingRecording(null);
-        currentAudioRef.current = null;
-        URL.revokeObjectURL(audioUrl);
-      };
-
-      audio.onerror = (e) => {
-        const errorMsg = audio.error?.message || 'Unknown playback error';
-        appendLog(`❌ Audio playback error: ${errorMsg}`, 'error', 'browser');
-        setPlayingRecording(null);
-        currentAudioRef.current = null;
-        URL.revokeObjectURL(audioUrl);
-      };
-
-      currentAudioRef.current = audio;
-      setPlayingRecording(recording.id);
-
-      // Start playing
-      const playPromise = audio.play();
-      
-      if (playPromise !== undefined) {
-        playPromise
-          .then(() => {
-            appendLog('✅ Audio play() promise resolved successfully', 'info', 'browser');
-          })
-          .catch((error) => {
-            appendLog(`❌ Audio play() failed: ${error.message}`, 'error', 'browser');
-            setPlayingRecording(null);
-            currentAudioRef.current = null;
-            URL.revokeObjectURL(audioUrl);
-          });
-      }
-    } catch (error) {
-      appendLog(`❌ Error setting up audio playback: ${error}`, 'error', 'browser');
+    audio.onended = () => {
       setPlayingRecording(null);
       currentAudioRef.current = null;
-    }
+    };
+
+    audio.onerror = () => {
+      setPlayingRecording(null);
+      currentAudioRef.current = null;
+    };
+
+    audio.play();
   };
 
   const getStatusIcon = (status: Recording['status']) => {
@@ -899,7 +787,7 @@ export function AIVoiceInputDemo() {
         {error && (
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
-            <AlertDescription>Connection failed</AlertDescription>
+            <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
 
@@ -991,7 +879,7 @@ export function AIVoiceInputDemo() {
                         <span className="ml-4">{recording.timestamp.toLocaleTimeString()}</span>
                         {recording.error && (
                           <div className="text-red-500 text-xs mt-1">
-                            {recording.error}
+                            Error: {recording.error}
                           </div>
                         )}
                       </div>
@@ -1059,14 +947,6 @@ export function AIVoiceInputDemo() {
                           className="flex items-center gap-1"
                         >
                           <Download className="w-3 h-3" />
-                        </Button>
-                        <Button 
-                          variant="outline" 
-                          size="sm" 
-                          onClick={() => deleteRecording(recording.id)}
-                          className="flex items-center gap-1 text-red-600 hover:text-red-700 hover:bg-red-50"
-                        >
-                          <Trash2 className="w-3 h-3" />
                         </Button>
                       </div>
                     </div>
