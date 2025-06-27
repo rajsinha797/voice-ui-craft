@@ -42,7 +42,6 @@ export function AIVoiceInputDemo() {
   const streamIdRef = useRef<string>('');
   const currentRecordingRef = useRef<Recording | null>(null);
   const connectionAttemptInProgress = useRef<boolean>(false);
-  const audioChunksRef = useRef<Blob[]>([]);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   
   // Duration tracking refs
@@ -60,6 +59,7 @@ export function AIVoiceInputDemo() {
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const destinationStreamRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const fullConversationRecorderRef = useRef<MediaRecorder | null>(null);
+  const fullConversationChunksRef = useRef<Blob[]>([]);
   
   // Playback control refs
   const currentPlaybackSourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -121,7 +121,7 @@ export function AIVoiceInputDemo() {
     // Reset refs
     connectionAttemptInProgress.current = false;
     cleanupInProgress.current = false;
-    audioChunksRef.current = [];
+    fullConversationChunksRef.current = [];
     nextSeqToPlayRef.current = 0;
     audioBufferMapRef.current = {};
     playbackQueueRef.current = [];
@@ -141,9 +141,18 @@ export function AIVoiceInputDemo() {
     // Update current recording to error state if exists
     if (currentRecordingRef.current) {
       const recordingLogs = [...currentRecordingLogsRef.current];
+      const finalDuration = conversationDurationRef.current;
+      
+      // Create final audio blob from collected chunks
+      let finalAudioBlob: Blob | undefined;
+      if (fullConversationChunksRef.current.length > 0) {
+        finalAudioBlob = new Blob(fullConversationChunksRef.current, { type: 'audio/webm' });
+        appendLog(`Created final audio blob from ${fullConversationChunksRef.current.length} chunks, size: ${finalAudioBlob.size} bytes`, 'info', 'browser');
+      }
+      
       setRecordings(prev => prev.map(r => 
         r.id === currentRecordingRef.current?.id 
-          ? { ...r, status: 'error', error: 'Connection failed', duration: conversationDurationRef.current, logs: recordingLogs }
+          ? { ...r, status: 'error', error: 'Connection failed', duration: finalDuration, audioBlob: finalAudioBlob, logs: recordingLogs }
           : r
       ));
       currentRecordingRef.current = null;
@@ -169,7 +178,7 @@ export function AIVoiceInputDemo() {
     setError(null);
     setIsConnecting(true);
     setIsConnected(false);
-    audioChunksRef.current = [];
+    fullConversationChunksRef.current = [];
     nextSeqToPlayRef.current = 0;
     audioBufferMapRef.current = {};
     playbackQueueRef.current = [];
@@ -211,10 +220,12 @@ export function AIVoiceInputDemo() {
     stopDurationTracking();
     
     if (fullConversationRecorderRef.current && fullConversationRecorderRef.current.state !== "inactive") {
+      appendLog('Stopping full conversation recorder', 'info', 'browser');
       fullConversationRecorderRef.current.stop();
     }
     
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      appendLog('Stopping media recorder', 'info', 'browser');
       mediaRecorderRef.current.stop();
     }
     
@@ -223,23 +234,22 @@ export function AIVoiceInputDemo() {
       const finalDuration = conversationDurationRef.current;
       const recordingLogs = [...currentRecordingLogsRef.current];
       
+      // Wait a bit for any final chunks to arrive, then create the final blob
       setTimeout(() => {
-        if (audioChunksRef.current.length > 0) {
-          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          
-          setRecordings(prev => prev.map(r => 
-            r.id === recordingId 
-              ? { ...r, duration: finalDuration, status: 'success', audioBlob, logs: recordingLogs }
-              : r
-          ));
+        let finalAudioBlob: Blob | undefined;
+        if (fullConversationChunksRef.current.length > 0) {
+          finalAudioBlob = new Blob(fullConversationChunksRef.current, { type: 'audio/webm' });
+          appendLog(`Created final audio blob from ${fullConversationChunksRef.current.length} chunks, size: ${finalAudioBlob.size} bytes`, 'info', 'browser');
         } else {
-          setRecordings(prev => prev.map(r => 
-            r.id === recordingId 
-              ? { ...r, duration: finalDuration, status: 'success', logs: recordingLogs }
-              : r
-          ));
+          appendLog('No audio chunks collected during recording', 'warning', 'browser');
         }
-      }, 100);
+        
+        setRecordings(prev => prev.map(r => 
+          r.id === recordingId 
+            ? { ...r, duration: finalDuration, status: 'success', audioBlob: finalAudioBlob, logs: recordingLogs }
+            : r
+        ));
+      }, 200);
     }
     
     currentRecordingRef.current = null;
@@ -477,8 +487,8 @@ export function AIVoiceInputDemo() {
       
       fullConversationRecorderRef.current.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-          appendLog(`Full conversation chunk recorded: ${event.data.size} bytes`, 'info', 'browser');
+          fullConversationChunksRef.current.push(event.data);
+          appendLog(`Full conversation chunk recorded: ${event.data.size} bytes, total chunks: ${fullConversationChunksRef.current.length}`, 'info', 'browser');
         }
       };
 
@@ -487,7 +497,7 @@ export function AIVoiceInputDemo() {
       };
 
       fullConversationRecorderRef.current.onstop = () => {
-        appendLog('Full conversation recording stopped', 'info', 'browser');
+        appendLog(`Full conversation recording stopped, total chunks collected: ${fullConversationChunksRef.current.length}`, 'info', 'browser');
       };
 
       fullConversationRecorderRef.current.onerror = (event) => {
