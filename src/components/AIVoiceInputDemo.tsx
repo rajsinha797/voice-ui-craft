@@ -143,7 +143,7 @@ export function AIVoiceInputDemo() {
       const recordingLogs = [...currentRecordingLogsRef.current];
       setRecordings(prev => prev.map(r => 
         r.id === currentRecordingRef.current?.id 
-          ? { ...r, status: 'error', error: errorMessage, duration: conversationDurationRef.current, logs: recordingLogs }
+          ? { ...r, status: 'error', error: 'Connection failed', duration: conversationDurationRef.current, logs: recordingLogs }
           : r
       ));
       currentRecordingRef.current = null;
@@ -333,19 +333,27 @@ export function AIVoiceInputDemo() {
         
         webSocketRef.current = null;
         
-        // If connection was not clean or unexpected, treat as error and reset all states
+        // Always reset all states on WebSocket close to ensure UI consistency
+        if (cleanupInProgress.current) {
+          return; // Avoid double cleanup
+        }
+        
+        // Clean up all resources
+        cleanupResources();
+        
+        // Reset all states
+        resetAllStates();
+        
+        // If connection was not clean or unexpected, treat as error
         if (!event.wasClean && event.code !== 1000) {
           handleConnectionFailure(`Connection lost unexpectedly: ${reason}`);
-        } else {
-          // Even for clean closes, reset states to ensure UI is consistent
-          resetAllStates();
         }
       };
 
       webSocketRef.current.onerror = (error) => {
         clearTimeout(connectionTimeout);
         appendLog('WebSocket connection error occurred', 'error', 'browser');
-        handleWebSocketError('WebSocket connection failed due to network error');
+        handleWebSocketError('Connection failed');
         reject(new Error('WebSocket connection failed'));
       };
 
@@ -802,7 +810,7 @@ export function AIVoiceInputDemo() {
         {error && (
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
-            <AlertDescription>{error}</AlertDescription>
+            <AlertDescription>Connection failed</AlertDescription>
           </Alert>
         )}
 
@@ -894,7 +902,7 @@ export function AIVoiceInputDemo() {
                         <span className="ml-4">{recording.timestamp.toLocaleTimeString()}</span>
                         {recording.error && (
                           <div className="text-red-500 text-xs mt-1">
-                            Error: {recording.error}
+                            {recording.error}
                           </div>
                         )}
                       </div>
